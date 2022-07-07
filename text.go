@@ -844,6 +844,7 @@ func (t *Text) RenderAsPath(r Renderer, m Matrix, resolution Resolution) {
 
 			style := DefaultStyle
 			style.FillColor = span.Face.Color
+			style.GradientInfo = span.Face.GradientInfo
 			p, _, err := span.Face.toPath(span.Glyphs, span.Face.PPEM(resolution))
 			if err != nil {
 				panic(err)
