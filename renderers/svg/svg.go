@@ -15,20 +15,22 @@ import (
 	"strings"
 
 	"github.com/tdewolff/canvas"
-	canvasFont "github.com/tdewolff/canvas/font"
 	canvasText "github.com/tdewolff/canvas/text"
+	"github.com/tdewolff/font"
 )
 
 type Options struct {
 	Compression int
 	EmbedFonts  bool
 	SubsetFonts bool
+	SizeUnits   string
 	canvas.ImageEncoding
 }
 
 var DefaultOptions = Options{
 	EmbedFonts:    true,
 	SubsetFonts:   false, // TODO: enable when properly handling GPOS and GSUB tables
+	SizeUnits:     "mm",
 	ImageEncoding: canvas.Lossless,
 }
 
@@ -58,7 +60,7 @@ func New(w io.Writer, width, height float64, opts *Options) *SVG {
 		w, _ = gzip.NewWriterLevel(w, opts.Compression)
 	}
 
-	fmt.Fprintf(w, `<svg version="1.1" width="%vmm" height="%vmm" viewBox="0 0 %v %v" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">`, dec(width), dec(height), dec(width), dec(height))
+	fmt.Fprintf(w, `<svg version="1.1" width="%v%s" height="%v%s" viewBox="0 0 %v %v" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">`, dec(width), opts.SizeUnits, dec(height), opts.SizeUnits, dec(width), dec(height))
 	return &SVG{
 		w:          w,
 		width:      width,
@@ -85,22 +87,28 @@ func (r *SVG) Close() error {
 func (r *SVG) writeFonts() {
 	if 0 < len(r.fonts) {
 		fmt.Fprintf(r.w, "<style>")
-		for font := range r.fonts {
-			b := font.SFNT.Data
+		for f := range r.fonts {
+			sfnt := f.SFNT
 			if r.opts.SubsetFonts {
-				glyphIDs := r.fontSubset[font].List()
-				b, _ = font.SFNT.Subset(glyphIDs, canvasFont.WriteMinTables)
+				glyphIDs := r.fontSubset[f].List()
+				sfntSubset, err := sfnt.Subset(glyphIDs, font.SubsetOptions{Tables: font.KeepMinTables})
+				if err == nil {
+					//	// TODO: report error?
+					sfnt = sfntSubset
+				}
 			}
-			fmt.Fprintf(r.w, "\n@font-face{font-family:'%s'", font.Name())
-			if font.Style().Weight() != canvas.FontRegular {
-				fmt.Fprintf(r.w, ";font-weight:%d", font.Style().CSS())
+			fontProgram := sfnt.Write()
+
+			fmt.Fprintf(r.w, "\n@font-face{font-family:'%s'", f.Name())
+			if f.Style().Weight() != canvas.FontRegular {
+				fmt.Fprintf(r.w, ";font-weight:%d", f.Style().CSS())
 			}
-			if font.Style().Italic() {
+			if f.Style().Italic() {
 				fmt.Fprintf(r.w, ";font-style:italic")
 			}
 			fmt.Fprintf(r.w, ";src:url('data:type/opentype;base64,")
 			encoder := base64.NewEncoder(base64.StdEncoding, r.w)
-			encoder.Write(b)
+			encoder.Write(fontProgram)
 			encoder.Close()
 			fmt.Fprintf(r.w, "');}")
 		}
@@ -239,8 +247,8 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 				}
 			} else if miter, ok := style.StrokeJoiner.(canvas.MiterJoiner); ok && !math.IsNaN(miter.Limit) {
 				// a miter line join is the default
-				if !canvas.Equal(miter.Limit*2.0/style.StrokeWidth, 4.0) {
-					fmt.Fprintf(b, ";stroke-miterlimit:%v", dec(miter.Limit*2.0/style.StrokeWidth))
+				if !canvas.Equal(miter.Limit, 4.0) {
+					fmt.Fprintf(b, ";stroke-miterlimit:%v", dec(miter.Limit))
 				}
 			} else {
 				panic("SVG: line join not support")

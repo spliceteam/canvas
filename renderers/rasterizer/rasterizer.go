@@ -26,19 +26,19 @@ type Rasterizer struct {
 	colorSpace canvas.ColorSpace
 }
 
-// New returns a renderer that draws to a rasterized image. By default the linear color space is used, which assumes input and output colors are in linearRGB. If the sRGB color space is used for drawing with an average of gamma=2.2, the input and output colors are assumed to be in sRGB (a common assumption) and blending happens in linearRGB. Be aware that for text this results in thin stems for black-on-white (but wide stems for white-on-black).
+// New returns a renderer that draws to a rasterized image. The final width and height of the image is the width and height (mm) multiplied by the resolution (px/mm), thus a higher resolution results in larger images. By default the linear color space is used, which assumes input and output colors are in linearRGB. If the sRGB color space is used for drawing with an average of gamma=2.2, the input and output colors are assumed to be in sRGB (a common assumption) and blending happens in linearRGB. Be aware that for text this results in thin stems for black-on-white (but wide stems for white-on-black).
 func New(width, height float64, resolution canvas.Resolution, colorSpace canvas.ColorSpace) *Rasterizer {
 	img := image.NewRGBA(image.Rect(0, 0, int(width*resolution.DPMM()+0.5), int(height*resolution.DPMM()+0.5)))
 	return FromImage(img, resolution, colorSpace)
 }
 
-// FromImage returns a renderer that draws to an existing image.
+// FromImage returns a renderer that draws to an existing image. A resolution of 1.0 means that canvas coordinates in millimeters are a 1-to-1 relation to pixels. A higher resolution means that a smaller rectangle in the canvas space corresponds to the final rasterized image (eg. a resolution of 2.0 means that 10 mm from the origin becomes the 20th pixel).
 func FromImage(img draw.Image, resolution canvas.Resolution, colorSpace canvas.ColorSpace) *Rasterizer {
 	bounds := img.Bounds()
 	if bounds.Dx() == 0 || bounds.Dy() == 0 {
-		panic("rasterizer size 0x0, increase resolution")
-	} else if float64(math.MaxInt32) < float64(bounds.Dx())*float64(bounds.Dy()) {
-		panic("rasterizer overflow, decrease resolution")
+		panic("raster size is zero, increase resolution")
+	} else if math.MaxInt32/bounds.Dx() < bounds.Dy() {
+		panic("raster size overflow, decrease resolution")
 	}
 
 	if colorSpace == nil {
@@ -67,9 +67,8 @@ func (r *Rasterizer) Size() (float64, float64) {
 // RenderPath renders a path to the canvas using a style and a transformation matrix.
 func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
 	// TODO: use fill rule (EvenOdd, NonZero) for rasterizer
-	fill := path
-	stroke := path
 	bounds := canvas.Rect{}
+	var fill, stroke *canvas.Path
 	if style.HasFill() {
 		fill = path.Transform(m)
 		if !style.HasStroke() {
@@ -78,6 +77,7 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 	}
 	if style.HasStroke() {
 		tolerance := canvas.PixelTolerance / r.resolution.DPMM()
+		stroke = path
 		if 0 < len(style.Dashes) {
 			stroke = stroke.Dash(style.DashOffset, style.Dashes...)
 		}
@@ -88,30 +88,31 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 
 	padding := 2
 	dx, dy := 0, 0
+	origin := r.Bounds().Min
 	size := r.Bounds().Size()
 	dpmm := r.resolution.DPMM()
 	x := int(bounds.X*dpmm) - padding
 	y := size.Y - int((bounds.Y+bounds.H)*dpmm) - padding
 	w := int(bounds.W*dpmm) + 2*padding
 	h := int(bounds.H*dpmm) + 2*padding
-	if (x+w <= 0 || size.X <= x) && (y+h <= 0 || size.Y <= y) {
+	if (x+w <= origin.X || origin.X+size.X <= x) && (y+h <= origin.Y || origin.Y+size.Y <= y) {
 		return // outside canvas
 	}
 
 	zp := image.Point{x, y}
-	if x < 0 {
+	if x < origin.X {
 		dx = -x
-		x = 0
+		x = origin.X
 	}
-	if y < 0 {
+	if y < origin.Y {
 		dy = -y
-		y = 0
+		y = origin.Y
 	}
-	if size.X <= x+w {
-		w = size.X - x
+	if origin.X+size.X <= x+w {
+		w = origin.X + size.X - x
 	}
-	if size.Y <= y+h {
-		h = size.Y - y
+	if origin.Y+size.Y <= y+h {
+		h = origin.Y + size.Y - y
 	}
 	if w <= 0 || h <= 0 {
 		return // has no size
@@ -159,9 +160,9 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 		} else if style.Stroke.IsGradient() {
 			gradient := style.Stroke.Gradient.SetColorSpace(r.colorSpace)
 			src = NewGradientImage(gradient, zp, size, r.resolution)
-		} else if style.Fill.IsPattern() {
+		} else if style.Stroke.IsPattern() {
 			pattern := style.Stroke.Pattern.SetColorSpace(r.colorSpace)
-			pattern.ClipTo(r, fill)
+			pattern.ClipTo(r, stroke)
 		}
 		if src != nil {
 			ras.Draw(r.Image, image.Rect(x, y, x+w, y+h), src, image.Point{dx, dy})
@@ -178,7 +179,7 @@ func (r *Rasterizer) RenderText(text *canvas.Text, m canvas.Matrix) {
 func (r *Rasterizer) RenderImage(img image.Image, m canvas.Matrix) {
 	// add transparent margin to image for smooth borders when rotating
 	// TODO: optimize when transformation is only translation or stretch (if optimizing, dont overwrite original img when gamma correcting)
-	margin := 4
+	margin := 0 // TODO: margin makes stretched image blurry, how can we make edges smoother after rotation without affecting stretching?
 	size := img.Bounds().Size()
 	sp := img.Bounds().Min // starting point
 	img2 := image.NewRGBA(image.Rect(0, 0, size.X+margin*2, size.Y+margin*2))

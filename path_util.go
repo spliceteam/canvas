@@ -33,6 +33,7 @@ func ellipseDeriv2(rx, ry, phi float64, theta float64) Point {
 }
 
 func ellipseCurvatureRadius(rx, ry float64, sweep bool, theta float64) float64 {
+	// positive for ccw / sweep
 	// phi has no influence on the curvature
 	dp := ellipseDeriv(rx, ry, 0.0, sweep, theta)
 	ddp := ellipseDeriv2(rx, ry, 0.0, theta)
@@ -64,7 +65,7 @@ func ellipseLength(rx, ry, theta1, theta2 float64) float64 {
 func ellipseToCenter(x1, y1, rx, ry, phi float64, large, sweep bool, x2, y2 float64) (float64, float64, float64, float64) {
 	if Equal(x1, x2) && Equal(y1, y2) {
 		return x1, y1, 0.0, 0.0
-	} else if Equal(y1, y2) && Equal(phi, 0.0) {
+	} else if Equal(math.Abs(x2-x1), rx) && Equal(y1, y2) && Equal(phi, 0.0) {
 		// common case since circles are defined as two arcs from (+dx,0) to (-dx,0) and back
 		cx, cy := x1+(x2-x1)/2.0, y1
 		theta := 0.0
@@ -78,14 +79,14 @@ func ellipseToCenter(x1, y1, rx, ry, phi float64, large, sweep bool, x2, y2 floa
 		return cx, cy, theta, theta + delta
 	}
 
-	// compute the half distance betwene for start and end point for the unrotated ellipse
+	// compute the half distance between start and end point for the unrotated ellipse
 	sinphi, cosphi := math.Sincos(phi)
 	x1p := cosphi*(x1-x2)/2.0 + sinphi*(y1-y2)/2.0
 	y1p := -sinphi*(x1-x2)/2.0 + cosphi*(y1-y2)/2.0
 
-	// check that radii are lage enough to reduce rouding errors
+	// check that radii are large enough to reduce rouding errors
 	radiiCheck := x1p*x1p/rx/rx + y1p*y1p/ry/ry
-	if radiiCheck > 1.0 {
+	if 1.0 < radiiCheck {
 		radiiScale := math.Sqrt(radiiCheck)
 		rx *= radiiScale
 		ry *= radiiScale
@@ -311,9 +312,75 @@ func ellipseToCubicBeziers(start Point, rx, ry, phi float64, large, sweep bool, 
 	return beziers
 }
 
+func xmonotoneEllipticArc(start Point, rx, ry, phi float64, large, sweep bool, end Point) *Path {
+	sign := 1.0
+	if !sweep {
+		sign = -1.0
+	}
+
+	cx, cy, theta0, theta1 := ellipseToCenter(start.X, start.Y, rx, ry, phi, large, sweep, end.X, end.Y)
+	sinphi, cosphi := math.Sincos(phi)
+	thetaRight := math.Atan2(-ry*sinphi, rx*cosphi)
+	thetaLeft := thetaRight + math.Pi
+
+	p := &Path{}
+	p.MoveTo(start.X, start.Y)
+	left := !angleEqual(thetaLeft, theta0) && angleNorm(sign*(thetaLeft-theta0)) < angleNorm(sign*(thetaRight-theta0))
+	for t := theta0; !angleEqual(t, theta1); {
+		dt := angleNorm(sign * (theta1 - t))
+		if left {
+			dt = math.Min(dt, angleNorm(sign*(thetaLeft-t)))
+		} else {
+			dt = math.Min(dt, angleNorm(sign*(thetaRight-t)))
+		}
+		t += sign * dt
+
+		pos := EllipsePos(rx, ry, phi, cx, cy, t)
+		p.ArcTo(rx, ry, phi*180.0/math.Pi, large, sweep, pos.X, pos.Y)
+		left = !left
+	}
+	return p
+}
+
 func flattenEllipticArc(start Point, rx, ry, phi float64, large, sweep bool, end Point, tolerance float64) *Path {
+	if Equal(rx, ry) {
+		// circle
+		r := rx
+		cx, cy, theta0, theta1 := ellipseToCenter(start.X, start.Y, rx, ry, phi, large, sweep, end.X, end.Y)
+		theta0 += phi
+		theta1 += phi
+
+		// draw line segments from arc+tolerance to arc+tolerance, touching arc-tolerance in between
+		// we start and end at the arc itself
+		dtheta := math.Abs(theta1 - theta0)
+		thetam := math.Acos(r / (r + tolerance))     // half angle of first/last segment
+		thetat := math.Acos(r / (r + 2.0*tolerance)) // half angle of middle segments
+		n := math.Ceil((dtheta - thetam*2.0) / (thetat * 2.0))
+
+		// evenly space out points along arc
+		ratio := dtheta / (thetam*2.0 + thetat*2.0*n)
+		thetam *= ratio
+		thetat *= ratio
+
+		// adjust distance from arc to lower total deviation area, add points on the outer circle
+		// of the tolerance since the middle of the line segment touches the inner circle and thus
+		// even out. Ratio < 1 is when the line segments are shorter (and thus not touch the inner
+		// tolerance circle).
+		r += ratio * tolerance
+
+		p := &Path{}
+		p.MoveTo(start.X, start.Y)
+		theta := thetam + thetat
+		for i := 0; i < int(n); i++ {
+			t := theta0 + math.Copysign(theta, theta1-theta0)
+			pos := PolarPoint(t, r).Add(Point{cx, cy})
+			p.LineTo(pos.X, pos.Y)
+			theta += 2.0 * thetat
+		}
+		p.LineTo(end.X, end.Y)
+		return p
+	}
 	// TODO: (flatten ellipse) use direct algorithm
-	// TODO: (flatten ellipse) use tolerance
 	return arcToCube(start, rx, ry, phi, large, sweep, end).Flatten(tolerance)
 }
 
@@ -492,6 +559,14 @@ func cubicBezierDeriv2(p0, p1, p2, p3 Point, t float64) Point {
 	return p0.Add(p1).Add(p2).Add(p3)
 }
 
+func cubicBezierDeriv3(p0, p1, p2, p3 Point, t float64) Point {
+	p0 = p0.Mul(-6.0)
+	p1 = p1.Mul(18.0)
+	p2 = p2.Mul(-18.0)
+	p3 = p3.Mul(6.0)
+	return p0.Add(p1).Add(p2).Add(p3)
+}
+
 // negative when curve bends CW while following t
 func cubicBezierCurvatureRadius(p0, p1, p2, p3 Point, t float64) float64 {
 	dp := cubicBezierDeriv(p0, p1, p2, p3, t)
@@ -505,6 +580,7 @@ func cubicBezierCurvatureRadius(p0, p1, p2, p3 Point, t float64) float64 {
 
 // return the normal at the right-side of the curve (when increasing t)
 func cubicBezierNormal(p0, p1, p2, p3 Point, t, d float64) Point {
+	// TODO: remove and use cubicBezierDeriv + Rot90CW?
 	if t == 0.0 {
 		n := p1.Sub(p0)
 		if n.X == 0 && n.Y == 0 {
@@ -615,6 +691,20 @@ func addCubicBezierLine(p *Path, p0, p1, p2, p3 Point, t, d float64) {
 	p.LineTo(pos.X, pos.Y)
 }
 
+func xmonotoneQuadraticBezier(p0, p1, p2 Point) *Path {
+	p := &Path{}
+	p.MoveTo(p0.X, p0.Y)
+	if tdenom := (p0.X - 2*p1.X + p2.X); !Equal(tdenom, 0.0) {
+		if t := (p0.X - p1.X) / tdenom; 0.0 < t && t < 1.0 {
+			_, q1, q2, _, r1, r2 := quadraticBezierSplit(p0, p1, p2, t)
+			p.QuadTo(q1.X, q1.Y, q2.X, q2.Y)
+			p1, p2 = r1, r2
+		}
+	}
+	p.QuadTo(p1.X, p1.Y, p2.X, p2.Y)
+	return p
+}
+
 func flattenQuadraticBezier(p0, p1, p2 Point, tolerance float64) *Path {
 	// see Flat, precise flattening of cubic Bézier path and offset curves, by T.F. Hain et al., 2005,  https://www.sciencedirect.com/science/article/pii/S0097849305001287
 	t := 0.0
@@ -639,6 +729,34 @@ func flattenQuadraticBezier(p0, p1, p2 Point, tolerance float64) *Path {
 		p.LineTo(p0.X, p0.Y)
 	}
 	p.LineTo(p2.X, p2.Y)
+	return p
+}
+
+func xmonotoneCubicBezier(p0, p1, p2, p3 Point) *Path {
+	a := -p0.X + 3*p1.X - 3*p2.X + p3.X
+	b := 2*p0.X - 4*p1.X + 2*p2.X
+	c := -p0.X + p1.X
+
+	p := &Path{}
+	p.MoveTo(p0.X, p0.Y)
+
+	split := false
+	t1, t2 := solveQuadraticFormula(a, b, c)
+	if !math.IsNaN(t1) && IntervalExclusive(t1, 0.0, 1.0) {
+		_, q1, q2, q3, r0, r1, r2, r3 := cubicBezierSplit(p0, p1, p2, p3, t1)
+		p.CubeTo(q1.X, q1.Y, q2.X, q2.Y, q3.X, q3.Y)
+		p0, p1, p2, p3 = r0, r1, r2, r3
+		split = true
+	}
+	if !math.IsNaN(t2) && IntervalExclusive(t2, 0.0, 1.0) {
+		if split {
+			t2 = (t2 - t1) / (1.0 - t1)
+		}
+		_, q1, q2, q3, _, r1, r2, r3 := cubicBezierSplit(p0, p1, p2, p3, t2)
+		p.CubeTo(q1.X, q1.Y, q2.X, q2.Y, q3.X, q3.Y)
+		p1, p2, p3 = r1, r2, r3
+	}
+	p.CubeTo(p1.X, p1.Y, p2.X, p2.Y, p3.X, p3.Y)
 	return p
 }
 

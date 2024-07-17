@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/ascii85"
-	"encoding/binary"
 	"fmt"
 	"image"
 	"io"
@@ -15,8 +14,9 @@ import (
 	"time"
 
 	"github.com/tdewolff/canvas"
-	canvasFont "github.com/tdewolff/canvas/font"
 	canvasText "github.com/tdewolff/canvas/text"
+	canvasFont "github.com/tdewolff/font"
+	"golang.org/x/text/encoding/charmap"
 )
 
 // TODO: Invalid graphics transparency, Group has a transparency S entry or the S entry is null
@@ -34,6 +34,7 @@ type pdfWriter struct {
 	fontSubset map[*canvas.Font]*canvas.FontSubsetter
 	fontsH     map[*canvas.Font]pdfRef
 	fontsV     map[*canvas.Font]pdfRef
+	fontsStd   map[*canvas.Font]pdfRef
 	compress   bool
 	subset     bool
 	title      string
@@ -50,6 +51,7 @@ func newPDFWriter(writer io.Writer) *pdfWriter {
 		fontSubset: map[*canvas.Font]*canvas.FontSubsetter{},
 		fontsH:     map[*canvas.Font]pdfRef{},
 		fontsV:     map[*canvas.Font]pdfRef{},
+		fontsStd:   map[*canvas.Font]pdfRef{},
 		compress:   true,
 		subset:     true,
 	}
@@ -126,6 +128,14 @@ const (
 	pdfFilterFlate   pdfFilter = "FlateDecode"
 )
 
+func pdfValContinuesName(val any) bool {
+	switch val.(type) {
+	case string, pdfName, pdfFilter, pdfArray, pdfDict, pdfStream:
+		return false
+	}
+	return true
+}
+
 func (w *pdfWriter) writeVal(i interface{}) {
 	switch v := i.(type) {
 	case bool:
@@ -157,16 +167,20 @@ func (w *pdfWriter) writeVal(i interface{}) {
 		}
 		w.write("]")
 	case pdfDict:
-		w.write("<< ")
+		w.write("<<")
 		if val, ok := v["Type"]; ok {
-			w.write("/Type ")
+			w.write("/Type")
+			if pdfValContinuesName(val) {
+				w.write(" ")
+			}
 			w.writeVal(val)
-			w.write(" ")
 		}
 		if val, ok := v["Subtype"]; ok {
-			w.write("/Subtype ")
+			w.write("/Subtype")
+			if pdfValContinuesName(val) {
+				w.write(" ")
+			}
 			w.writeVal(val)
-			w.write(" ")
 		}
 		keys := []string{}
 		for key := range v {
@@ -177,9 +191,10 @@ func (w *pdfWriter) writeVal(i interface{}) {
 		sort.Strings(keys)
 		for _, key := range keys {
 			w.writeVal(pdfName(key))
-			w.write(" ")
+			if pdfValContinuesName(v[pdfName(key)]) {
+				w.write(" ")
+			}
 			w.writeVal(v[pdfName(key)])
-			w.write(" ")
 		}
 		w.write(">>")
 	case pdfStream:
@@ -217,7 +232,7 @@ func (w *pdfWriter) writeVal(i interface{}) {
 
 		v.dict["Length"] = len(b)
 		w.writeVal(v.dict)
-		w.write(" stream\n")
+		w.write("stream\n")
 		w.writeBytes(b)
 		w.write("\nendstream")
 	default:
@@ -227,38 +242,107 @@ func (w *pdfWriter) writeVal(i interface{}) {
 
 func (w *pdfWriter) writeObject(val interface{}) pdfRef {
 	w.objOffsets = append(w.objOffsets, w.pos)
-	w.write("%v 0 obj\n", len(w.objOffsets))
+	w.write("%v 0 obj", len(w.objOffsets))
 	w.writeVal(val)
-	w.write("\nendobj\n")
+	w.write("endobj\n")
 	return pdfRef(len(w.objOffsets))
 }
 
+func standardFontName(font *canvas.Font) string {
+	switch strings.ToLower(font.Name()) {
+	case "courier":
+		if font.Style() == canvas.FontRegular {
+			return "Courier"
+		} else if font.Style() == canvas.FontBold {
+			return "Courier-Bold"
+		} else if font.Style() == canvas.FontItalic {
+			return "Courier-Oblique"
+		} else if font.Style() == canvas.FontBold|canvas.FontItalic {
+			return "Courier-BoldOblique"
+		}
+	case "dingbats":
+		if font.Style() == canvas.FontRegular {
+			return "ZapfDingbats"
+		}
+	case "helvetica":
+		if font.Style() == canvas.FontRegular {
+			return "Helvetica"
+		} else if font.Style() == canvas.FontBold {
+			return "Helvetica-Bold"
+		} else if font.Style() == canvas.FontItalic {
+			return "Helvetica-Oblique"
+		} else if font.Style() == canvas.FontBold|canvas.FontItalic {
+			return "Helvetica-BoldOblique"
+		}
+	case "symbol":
+		if font.Style() == canvas.FontRegular {
+			return "Symbol"
+		}
+	case "times":
+		if font.Style() == canvas.FontRegular {
+			return "Times-Roman"
+		} else if font.Style() == canvas.FontBold {
+			return "Times-Bold"
+		} else if font.Style() == canvas.FontItalic {
+			return "Times-Italic"
+		} else if font.Style() == canvas.FontBold|canvas.FontItalic {
+			return "Times-BoldItalic"
+		}
+	}
+	return ""
+}
+
 func (w *pdfWriter) getFont(font *canvas.Font, vertical bool) pdfRef {
+	if standardFont := standardFontName(font); standardFont != "" {
+		// handle 14 embedded standard fonts in PDF if name and style matches
+		if ref, ok := w.fontsStd[font]; ok {
+			return ref
+		}
+
+		dict := pdfDict{
+			"Type":     pdfName("Font"),
+			"Subtype":  pdfName("Type1"),
+			"BaseFont": pdfName(standardFont),
+			"Encoding": pdfName("WinAnsiEncoding"),
+		}
+		ref := w.writeObject(dict)
+		w.fontsStd[font] = ref
+		// don't set fontSubset
+		return ref
+	}
+
 	fonts := w.fontsH
 	if vertical {
 		fonts = w.fontsV
 	}
-
 	if ref, ok := fonts[font]; ok {
 		return ref
 	}
 	w.objOffsets = append(w.objOffsets, 0)
 	ref := pdfRef(len(w.objOffsets))
 	fonts[font] = ref
-
 	w.fontSubset[font] = canvas.NewFontSubsetter()
 	return ref
 }
 
 func (w *pdfWriter) writeFont(ref pdfRef, font *canvas.Font, vertical bool) {
-	// subset the font
-	fontProgram := font.SFNT.Data
-	glyphIDs := w.fontSubset[font].List()
+	// subset the font, we only write the used characters to the PDF CMap object to reduce its
+	// length. At the end of the function we add a CID to GID mapping to correctly select the
+	// right glyphID.
+	sfnt := font.SFNT
+	glyphIDs := w.fontSubset[font].List() // also when not subsetting, to minimize cmap table
 	if w.subset {
-		// TODO: CFF font subsetting doesn't work
-		// TODO: remove all optional tables such as kern, GPOS, GSUB, ...
-		fontProgram, glyphIDs = font.SFNT.Subset(glyphIDs, canvasFont.WritePDFTables)
+		if sfnt.IsCFF && sfnt.CFF != nil {
+			sfnt.CFF.SetGlyphNames(nil)
+		}
+		sfntSubset, err := sfnt.Subset(glyphIDs, canvasFont.SubsetOptions{Tables: canvasFont.KeepPDFTables})
+		if err == nil {
+			sfnt = sfntSubset
+		} else {
+			fmt.Println("WARNING: font subsetting failed:", err)
+		}
 	}
+	fontProgram := sfnt.Write()
 
 	// calculate the character widths for the W array and shorten it
 	f := 1000.0 / float64(font.SFNT.Head.UnitsPerEm)
@@ -446,9 +530,25 @@ end`, bfRangeCount, bfRange.String(), bfCharCount, bfChar.String())
 	}
 
 	w.objOffsets[ref-1] = w.pos
-	w.write("%v 0 obj\n", ref)
+	w.write("%v 0 obj", ref)
 	w.writeVal(dict)
-	w.write("\nendobj\n")
+	w.write("endobj\n")
+}
+
+func (w *pdfWriter) writeFonts(fontMap map[*canvas.Font]pdfRef, vertical bool) {
+	// sort fonts by ref to make PDF deterministic
+	refs := make([]pdfRef, 0, len(fontMap))
+	refMap := make(map[pdfRef]*canvas.Font, len(fontMap))
+	for font, ref := range fontMap {
+		refs = append(refs, ref)
+		refMap[ref] = font
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i] < refs[j]
+	})
+	for _, ref := range refs {
+		w.writeFont(ref, refMap[ref], vertical)
+	}
 }
 
 // Close finished the document.
@@ -463,22 +563,19 @@ func (w *pdfWriter) Close() error {
 		kids = append(kids, page)
 	}
 
-	for font, ref := range w.fontsH {
-		w.writeFont(ref, font, false)
-	}
-	for font, ref := range w.fontsV {
-		w.writeFont(ref, font, true)
-	}
+	// write fonts
+	w.writeFonts(w.fontsH, false)
+	w.writeFonts(w.fontsV, false)
 
 	// document catalog
 	w.objOffsets[0] = w.pos
-	w.write("%v 0 obj\n", 1)
+	w.write("%v 0 obj", 1)
 	w.writeVal(pdfDict{
 		"Type":  pdfName("Catalog"),
 		"Pages": pdfRef(3),
 		// TODO: add metadata?
 	})
-	w.write("\nendobj\n")
+	w.write("endobj\n")
 
 	// metadata
 	info := pdfDict{
@@ -502,19 +599,19 @@ func (w *pdfWriter) Close() error {
 	}
 
 	w.objOffsets[1] = w.pos
-	w.write("%v 0 obj\n", 2)
+	w.write("%v 0 obj", 2)
 	w.writeVal(info)
-	w.write("\nendobj\n")
+	w.write("endobj\n")
 
 	// page tree
 	w.objOffsets[2] = w.pos
-	w.write("%v 0 obj\n", 3)
+	w.write("%v 0 obj", 3)
 	w.writeVal(pdfDict{
 		"Type":  pdfName("Pages"),
 		"Kids":  pdfArray(kids),
 		"Count": len(kids),
 	})
-	w.write("\nendobj\n")
+	w.write("endobj\n")
 
 	xrefOffset := w.pos
 	w.write("xref\n0 %d\n0000000000 65535 f \n", len(w.objOffsets)+1)
@@ -537,6 +634,7 @@ type pdfPageWriter struct {
 	pdf           *pdfWriter
 	width, height float64
 	resources     pdfDict
+	annots        pdfArray
 
 	graphicsStates map[float64]pdfName
 	alpha          float64
@@ -605,7 +703,7 @@ func (w *pdfPageWriter) writePage(parent pdfRef) pdfRef {
 		stream.dict["Filter"] = pdfFilterFlate
 	}
 	contents := w.pdf.writeObject(stream)
-	return w.pdf.writeObject(pdfDict{
+	page := pdfDict{
 		"Type":      pdfName("Page"),
 		"Parent":    parent,
 		"MediaBox":  pdfArray{0.0, 0.0, w.width * ptPerMm, w.height * ptPerMm},
@@ -617,7 +715,27 @@ func (w *pdfPageWriter) writePage(parent pdfRef) pdfRef {
 			"CS":   pdfName("DeviceRGB"),
 		},
 		"Contents": contents,
-	})
+	}
+	if 0 < len(w.annots) {
+		page["Annots"] = w.annots
+	}
+	return w.pdf.writeObject(page)
+}
+
+// AddAnnotation adds an annotation.
+func (w *pdfPageWriter) AddURIAction(uri string, rect canvas.Rect) {
+	annot := pdfDict{
+		"Type":     pdfName("Annot"),
+		"Subtype":  pdfName("Link"),
+		"Border":   pdfArray{0, 0, 0},
+		"Rect":     pdfArray{rect.X * ptPerMm, rect.Y * ptPerMm, (rect.X + rect.W) * ptPerMm, (rect.Y + rect.H) * ptPerMm},
+		"Contents": uri,
+		"A": pdfDict{
+			"S":   pdfName("URI"),
+			"URI": uri,
+		},
+	}
+	w.annots = append(w.annots, annot)
 }
 
 // SetAlpha sets the transparency value.
@@ -866,20 +984,61 @@ func (w *pdfPageWriter) WriteText(mode canvas.WritingMode, TJ ...interface{}) {
 			fmt.Fprintf(w, " (")
 		}
 		subset := w.pdf.fontSubset[w.font]
-		for _, glyph := range glyphs {
-			glyphID := subset.Get(glyph.ID)
-			for _, c := range []uint8{uint8((glyphID & 0xff00) >> 8), uint8(glyphID & 0x00ff)} {
+		if subset == nil {
+			for _, glyph := range glyphs {
+				c, ok := charmap.Windows1252.EncodeRune(glyph.Text)
+				if !ok {
+					if '\u2000' <= glyph.Text && glyph.Text <= '\u200A' {
+						c = ' '
+					}
+				}
 				if c == '\n' {
-					binary.Write(w, binary.BigEndian, uint8('\\'))
-					binary.Write(w, binary.BigEndian, uint8('n'))
+					w.WriteByte('\\')
+					w.WriteByte('n')
 				} else if c == '\r' {
-					binary.Write(w, binary.BigEndian, uint8('\\'))
-					binary.Write(w, binary.BigEndian, uint8('r'))
+					w.WriteByte('\\')
+					w.WriteByte('r')
+				} else if c == '\t' {
+					w.WriteByte('\\')
+					w.WriteByte('t')
+				} else if c == '\b' {
+					w.WriteByte('\\')
+					w.WriteByte('b')
+				} else if c == '\f' {
+					w.WriteByte('\\')
+					w.WriteByte('f')
 				} else if c == '\\' || c == '(' || c == ')' {
-					binary.Write(w, binary.BigEndian, uint8('\\'))
-					binary.Write(w, binary.BigEndian, c)
+					w.WriteByte('\\')
+					w.WriteByte(c)
 				} else {
-					binary.Write(w, binary.BigEndian, c)
+					w.WriteByte(c)
+				}
+			}
+		} else {
+			for _, glyph := range glyphs {
+				glyphID := subset.Get(glyph.ID)
+				for _, c := range []uint8{uint8((glyphID & 0xff00) >> 8), uint8(glyphID & 0x00ff)} {
+					if c == '\n' {
+						w.WriteByte('\\')
+						w.WriteByte('n')
+					} else if c == '\r' {
+						w.WriteByte('\\')
+						w.WriteByte('r')
+					} else if c == '\t' {
+						w.WriteByte('\\')
+						w.WriteByte('t')
+					} else if c == '\b' {
+						w.WriteByte('\\')
+						w.WriteByte('b')
+					} else if c == '\f' {
+						w.WriteByte('\\')
+						w.WriteByte('f')
+					} else if c == '\\' || c == '(' || c == ')' {
+						w.WriteByte('\\')
+						w.WriteByte(c)
+					} else {
+						w.WriteByte(c)
+					}
 				}
 			}
 		}
