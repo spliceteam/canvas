@@ -68,7 +68,7 @@ func TestPDFText(t *testing.T) {
 		doTestPDFText(t, false, 506000, "TestPDFText_no_subset.pdf")
 	})
 	t.Run("with_subset", func(t *testing.T) {
-		doTestPDFText(t, true, 294000, "TestPDFText_subset_fonts.pdf")
+		doTestPDFText(t, true, 9500, "TestPDFText_subset_fonts.pdf")
 	})
 }
 
@@ -128,9 +128,9 @@ func TestPDFMultipage(t *testing.T) {
 	test.Error(t, err)
 	out := buf.String()
 
-	test.That(t, strings.Contains(out, "/Type /Pages /Count 2"), `could not find "/Type /Pages /Count 2" in output`)
+	test.That(t, strings.Contains(out, "/Type/Pages/Count 2"), `could not find "/Type /Pages /Count 2" in output`)
 
-	nbPages := strings.Count(out, "/Type /Page ")
+	nbPages := strings.Count(out, "/Type/Page/")
 	test.That(t, nbPages == 2, "expected 2 pages, got", nbPages)
 }
 
@@ -143,9 +143,9 @@ func TestPDFMetadata(t *testing.T) {
 	test.Error(t, err)
 	out := buf.String()
 
-	test.That(t, strings.Contains(out, "/Title (a1)"), `could not find "/Title (a1)" in output`)
-	test.That(t, strings.Contains(out, "/Subject (b2)"), `could not find "/Subject (b2)" in output`)
-	test.That(t, strings.Contains(out, "/Keywords (c3)"), `could not find "/Keywords (c3)" in output`)
-	test.That(t, strings.Contains(out, "/Author (d4)"), `could not find "/Author (d4)" in output`)
-	test.That(t, strings.Contains(out, "/Creator (e5)"), `could not find "/Creator (e5)" in output`)
+	test.That(t, strings.Contains(out, "/Title(a1)"), `could not find "/Title (a1)" in output`)
+	test.That(t, strings.Contains(out, "/Subject(b2)"), `could not find "/Subject (b2)" in output`)
+	test.That(t, strings.Contains(out, "/Keywords(c3)"), `could not find "/Keywords (c3)" in output`)
+	test.That(t, strings.Contains(out, "/Author(d4)"), `could not find "/Author (d4)" in output`)
+	test.That(t, strings.Contains(out, "/Creator(e5)"), `could not find "/Creator (e5)" in output`)
 }

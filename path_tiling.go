@@ -39,10 +39,10 @@ func TileRectangle(cell Matrix, dst, src Rect) []Matrix {
 	// find extremes along cell axes
 	invCell := cell.Inv()
 	points := []Point{
-		invCell.Dot(Point{dst.X, dst.Y}),
-		invCell.Dot(Point{dst.X + dst.W, dst.Y}),
-		invCell.Dot(Point{dst.X + dst.W, dst.Y + dst.H}),
-		invCell.Dot(Point{dst.X, dst.Y + dst.H}),
+		invCell.Dot(Point{dst.X0, dst.Y0}),
+		invCell.Dot(Point{dst.X1, dst.Y0}),
+		invCell.Dot(Point{dst.X1, dst.Y1}),
+		invCell.Dot(Point{dst.X0, dst.Y1}),
 	}
 	x0, x1 := points[0].X, points[0].X
 	y0, y1 := points[0].Y, points[0].Y
@@ -55,16 +55,17 @@ func TileRectangle(cell Matrix, dst, src Rect) []Matrix {
 
 	// add/subtract when overflowing/underflowing cell
 	cellBounds := src.Transform(invCell)
-	x0 -= cellBounds.X + cellBounds.W - 1.0
-	y0 -= cellBounds.Y + cellBounds.H - 1.0
-	x1 -= cellBounds.X
-	y1 -= cellBounds.Y
+	x0 -= cellBounds.X1 - 1.0
+	y0 -= cellBounds.Y1 - 1.0
+	x1 -= cellBounds.X0
+	y1 -= cellBounds.Y0
 
 	// collect all positions
 	cells := []Matrix{}
 	for y := math.Floor(y0); y < y1; y += 1.0 {
 		for x := math.Floor(x0); x < x1; x += 1.0 {
-			if src.Move(cell.Dot(Point{x, y})).Overlaps(dst) {
+			p := cell.Dot(Point{x, y})
+			if src.Translate(p.X, p.Y).Overlaps(dst) {
 				cells = append(cells, cell.Translate(x, y))
 			}
 		}
@@ -280,9 +281,9 @@ func TileRectangle(cell Matrix, dst, src Rect) []Matrix {
 //		rev := (isometry[0][0] < 0.0) != (isometry[1][1] < 0.0)
 //		isometry = Identity.Mul(cell).Mul(isometry).Mul(invCell)
 //		if p.Closed() && rev {
-//			r = r.Append(p.Transform(isometry).Reverse())
+//			r = r.Append(p.Copy().Transform(isometry).Reverse())
 //		} else {
-//			r = r.Append(p.Transform(isometry))
+//			r = r.Append(p.Copy().Transform(isometry))
 //		}
 //	}
 //	return r
@@ -299,7 +300,7 @@ func (p *Path) Tile(clip *Path, cell Matrix) *Path {
 	r := &Path{}
 	for _, cell := range cells {
 		pos := cell.Dot(Origin)
-		r = r.Append(p.Translate(pos.X, pos.Y))
+		r = r.Append(p.Copy().Translate(pos.X, pos.Y))
 	}
 	return r.And(clip)
 }

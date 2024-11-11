@@ -115,7 +115,7 @@ func (RoundJoiner) String() string {
 
 // MiterJoin connects two path elements by extending the ends of the paths as lines until they meet. If this point is further than the limit, this will result in a bevel join (MiterJoin) or they will meet at the limit (MiterClipJoin).
 var MiterJoin Joiner = MiterJoiner{BevelJoin, 4.0}
-var MiterClipJoin Joiner = MiterJoiner{nil, 4.0}
+var MiterClipJoin Joiner = MiterJoiner{nil, 4.0} // TODO: should extend limit*halfwidth before bevel
 
 // MiterJoiner is a miter joiner.
 type MiterJoiner struct {
@@ -129,7 +129,6 @@ func (j MiterJoiner) Join(rhs, lhs *Path, halfWidth float64, pivot, n0, n1 Point
 		BevelJoin.Join(rhs, lhs, halfWidth, pivot, n0, n1, r0, r1)
 		return
 	}
-	limit := math.Max(j.Limit, 1.001) // otherwise nearly linear joins will also get clipped
 
 	cw := 0.0 <= n0.Rot90CW().Dot(n1)
 	hw := halfWidth
@@ -137,8 +136,11 @@ func (j MiterJoiner) Join(rhs, lhs *Path, halfWidth float64, pivot, n0, n1 Point
 		hw = -hw // used to calculate |R|, when running CW then n0 and n1 point the other way, so the sign of r0 and r1 is negated
 	}
 
-	theta := n0.AngleBetween(n1) / 2.0
-	d := hw / math.Cos(theta) // half the miter length
+	// note that cos(theta) below refers to sin(theta/2) in the documentation of stroke-miterlimit
+	// in https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/stroke-miterlimit
+	theta := n0.AngleBetween(n1) / 2.0 // half the angle between normals
+	d := hw / math.Cos(theta)          // half the miter length
+	limit := math.Max(j.Limit, 1.001)  // otherwise nearly linear joins will also get clipped
 	clip := !math.IsNaN(limit) && limit*halfWidth < math.Abs(d)
 	if clip && j.GapJoiner != nil {
 		j.GapJoiner.Join(rhs, lhs, halfWidth, pivot, n0, n1, r0, r1)
@@ -378,6 +380,42 @@ func (j ArcsJoiner) String() string {
 	return "Arcs"
 }
 
+func (p *Path) optimizeInnerBend(i int) {
+	// i is the index of the line segment in the inner bend connecting both edges
+	ai := i - cmdLen(p.d[i-1])
+	bi := i + cmdLen(p.d[i])
+	if ai == 0 {
+		return
+	}
+
+	a0 := Point{p.d[ai-3], p.d[ai-2]}
+	b0 := Point{p.d[bi-3], p.d[bi-2]}
+	if bi == len(p.d) {
+		// inner bend is at the path's start
+		bi = 4
+	}
+
+	// TODO: implement other segment combinations
+	zs_ := [2]Intersection{}
+	zs := zs_[:]
+	if (p.d[ai] == LineToCmd || p.d[ai] == CloseCmd) && (p.d[bi] == LineToCmd || p.d[bi] == CloseCmd) {
+		zs = intersectionSegment(zs[:0], a0, p.d[ai:ai+4], b0, p.d[bi:bi+4])
+		// TODO: check conditions for pathological cases
+		if len(zs) == 1 && zs[0].T[0] != 0.0 && zs[0].T[0] != 1.0 && zs[0].T[1] != 0.0 && zs[0].T[1] != 1.0 {
+			p.d[ai+1] = zs[0].X
+			p.d[ai+2] = zs[0].Y
+			if bi == 4 {
+				// inner bend is at the path's start
+				p.d = p.d[:i]
+				p.d[1] = zs[0].X
+				p.d[2] = zs[0].Y
+			} else {
+				p.d = append(p.d[:i], p.d[bi:]...)
+			}
+		}
+	}
+}
+
 type pathStrokeState struct {
 	cmd    float64
 	p0, p1 Point   // position of start and end
@@ -488,6 +526,7 @@ func (p *Path) offset(halfWidth float64, cr Capper, jr Joiner, strokeOpen bool, 
 	lStart := states[0].p0.Sub(states[0].n0)
 	rhs.MoveTo(rStart.X, rStart.Y)
 	lhs.MoveTo(lStart.X, lStart.Y)
+	rhsJoinIndex, lhsJoinIndex := -1, -1
 	for i, cur := range states {
 		switch cur.cmd {
 		case LineToCmd:
@@ -517,16 +556,28 @@ func (p *Path) offset(halfWidth float64, cr Capper, jr Joiner, strokeOpen bool, 
 			lhs.ArcTo(lLambda*(cur.rx-dr), lLambda*(cur.ry-dr), cur.rot, cur.large, cur.sweep, lEnd.X, lEnd.Y)
 		}
 
+		// optimize inner bend
+		if 0 < i {
+			prev := states[i-1]
+			cw := 0.0 <= prev.n1.Rot90CW().Dot(cur.n0)
+			if cw && rhsJoinIndex != -1 {
+				rhs.optimizeInnerBend(rhsJoinIndex)
+			} else if !cw && lhsJoinIndex != -1 {
+				lhs.optimizeInnerBend(lhsJoinIndex)
+			}
+		}
+		rhsJoinIndex = -1
+		lhsJoinIndex = -1
+
 		// join the cur and next path segments
 		if i+1 < len(states) || closed {
-			var next pathStrokeState
+			next := states[0]
 			if i+1 < len(states) {
 				next = states[i+1]
-			} else {
-				next = states[0]
 			}
-
 			if !cur.n1.Equals(next.n0) {
+				rhsJoinIndex = len(rhs.d)
+				lhsJoinIndex = len(lhs.d)
 				jr.Join(rhs, lhs, halfWidth, cur.p1, cur.n1, next.n0, cur.r1, next.r0)
 			}
 		}
@@ -534,17 +585,29 @@ func (p *Path) offset(halfWidth float64, cr Capper, jr Joiner, strokeOpen bool, 
 
 	if closed {
 		rhs.Close()
-		rhs.optimizeClose()
 		lhs.Close()
+
+		// optimize inner bend
+		if 1 < len(states) {
+			cw := 0.0 <= states[len(states)-1].n1.Rot90CW().Dot(states[0].n0)
+			if cw && rhsJoinIndex != -1 {
+				rhs.optimizeInnerBend(rhsJoinIndex)
+			} else if !cw && lhsJoinIndex != -1 {
+				lhs.optimizeInnerBend(lhsJoinIndex)
+			}
+		}
+
+		rhs.optimizeClose()
 		lhs.optimizeClose()
 	} else if strokeOpen {
 		lhs = lhs.Reverse()
 		cr.Cap(rhs, halfWidth, states[len(states)-1].p1, states[len(states)-1].n1)
 		rhs = rhs.Join(lhs)
 		cr.Cap(rhs, halfWidth, states[0].p0, states[0].n0.Neg())
+		lhs = nil
+
 		rhs.Close()
 		rhs.optimizeClose()
-		lhs = nil
 	}
 	return rhs, lhs
 }
@@ -587,8 +650,6 @@ func (p *Path) Offset(w float64, fillRule FillRule, tolerance float64) *Path {
 
 // Stroke converts a path into a stroke of width w and returns a new path. It uses cr to cap the start and end of the path, and jr to join all path elements. If the path closes itself, it will use a join between the start and end instead of capping them. The tolerance is the maximum deviation from the original path when flattening Béziers and optimizing the stroke.
 func (p *Path) Stroke(w float64, cr Capper, jr Joiner, tolerance float64) *Path {
-	// TODO: start first point at intersection between last and first segment. This allows a rectangle to have a stroke with twice 1xM, 3xL and one z command, just like a rectangle itself.
-	// TODO: when w is much bigger than the bounds of p, the negative inner path will cancel parts. The negative inner path should disappear, probably in closeInnerBends?
 	if cr == nil {
 		cr = ButtCap
 	}

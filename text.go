@@ -368,6 +368,13 @@ func NewTextLine(face *FontFace, s string, halign TextAlign) *Text {
 			skipNext = r == '\r' && j+1 < len(s) && s[j+1] == '\n'
 		}
 	}
+	for _, line := range t.lines {
+		if 0 < len(line.spans) {
+			last := line.spans[len(line.spans)-1]
+			t.Width = math.Max(t.Width, last.X+last.Width)
+		}
+	}
+	t.Height = y - spacing
 	return t
 }
 
@@ -481,7 +488,7 @@ func (rt *RichText) WriteFace(face *FontFace, text string) {
 // WriteCanvas writes an inline canvas object.
 func (rt *RichText) WriteCanvas(c *Canvas, valign VerticalAlign) {
 	width, height := c.Size()
-	rt.WriteRune('\uFFFC') // object replacement character
+	rt.WriteRune(text.ObjectRune) // replaced by object
 	rt.objects = append(rt.objects, TextSpanObject{
 		Canvas: c,
 		Width:  width,
@@ -495,7 +502,7 @@ func (rt *RichText) WritePath(path *Path, col color.RGBA, valign VerticalAlign) 
 	style := DefaultStyle
 	style.Fill.Color = col
 	bounds := path.Bounds()
-	c := New(bounds.X+bounds.W, bounds.Y+bounds.H)
+	c := New(bounds.X1, bounds.Y1)
 	c.RenderPath(path, style, Identity)
 	rt.WriteCanvas(c, valign)
 }
@@ -564,7 +571,7 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, inde
 	embeddingLevels := text.EmbeddingLevels(logRunes)
 
 	// itemize string by font face and script
-	// this also splits on embedding level boundaries and runs of U+FFFC (object replacement)
+	// this also splits on embedding level boundaries and runs of ObjectRune (replaced by object)
 	i := 0       // index into logRunes
 	curFace := 0 // index into rt.faces
 	runs := []textRun{}
@@ -601,7 +608,7 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, inde
 			glyphRun[i].Size = run.Face.Size
 			glyphRun[i].Script = run.Script
 			glyphRun[i].Cluster += clusterOffset
-			if glyph.Text == '\uFFFC' {
+			if glyph.Text == text.ObjectRune {
 				// path/image objects
 				obj := rt.objects[objectOffset]
 				ppem := float64(run.Face.Font.SFNT.Head.UnitsPerEm)
@@ -690,8 +697,6 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, inde
 		fonts:           map[*Font]bool{},
 		WritingMode:     rt.mode,
 		TextOrientation: rt.orient,
-		Width:           width,
-		Height:          height,
 		Text:            log,
 		Overflows:       overflows,
 	}
@@ -801,7 +806,7 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, inde
 
 				var w float64
 				var objects []TextSpanObject
-				if glyphs[a].Text == '\uFFFC' {
+				if glyphs[a].Text == text.ObjectRune {
 					// path/image objects
 					n := b - a
 					objects = make([]TextSpanObject, n)
@@ -922,6 +927,20 @@ func (rt *RichText) ToText(width, height float64, halign, valign TextAlign, inde
 			t.lines[j].y = height - t.lines[j].y
 		}
 	}
+
+	if width == 0.0 {
+		for _, line := range t.lines {
+			if 0 < len(line.spans) {
+				last := line.spans[len(line.spans)-1]
+				t.Width = math.Max(t.Width, last.X+last.Width)
+			}
+		}
+	}
+	if height == 0.0 {
+		height = y
+	}
+	t.Width = width
+	t.Height = height
 	return t
 }
 
@@ -971,7 +990,8 @@ func (t *Text) Bounds() Rect {
 	for _, line := range t.lines {
 		for _, span := range line.spans {
 			// TODO: vertical text
-			rect = rect.Add(Rect{span.X, -line.y - span.Face.Metrics().Descent, span.Width, span.Face.Metrics().Ascent + span.Face.Metrics().Descent})
+			x, y := span.X, -line.y-span.Face.Metrics().Descent
+			rect = rect.Add(Rect{x, y, x + span.Width, y + span.Face.Metrics().Ascent + span.Face.Metrics().Descent})
 		}
 	}
 	return rect
@@ -991,7 +1011,7 @@ func (t *Text) OutlineBounds() Rect {
 				panic(err)
 			}
 			spanBounds := p.Bounds()
-			spanBounds = spanBounds.Move(Point{span.X, -line.y})
+			spanBounds = spanBounds.Translate(span.X, -line.y)
 			r = r.Add(spanBounds)
 		}
 	}
@@ -1178,7 +1198,7 @@ func (t *Text) WalkSpans(callback func(float64, float64, TextSpan)) {
 	}
 }
 
-// RenderAsPath renders the text and its decorations converted to paths, calling r.RenderPath.
+// RenderAsPath renders the text and its decorations converted to paths, calling r.RenderPath on the renderer. Note that text lines are drawn downwards starting at the origin, that is along negative Y. The origin is thus the top-left corner of the text box.
 func (t *Text) RenderAsPath(r Renderer, m Matrix, resolution Resolution) {
 	t.WalkDecorations(func(paint Paint, p *Path) {
 		style := DefaultStyle

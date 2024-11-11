@@ -23,12 +23,14 @@ type Options struct {
 	Compression int
 	EmbedFonts  bool
 	SubsetFonts bool
+	SizeUnits   string
 	canvas.ImageEncoding
 }
 
 var DefaultOptions = Options{
 	EmbedFonts:    true,
 	SubsetFonts:   false, // TODO: enable when properly handling GPOS and GSUB tables
+	SizeUnits:     "mm",
 	ImageEncoding: canvas.Lossless,
 }
 
@@ -58,7 +60,7 @@ func New(w io.Writer, width, height float64, opts *Options) *SVG {
 		w, _ = gzip.NewWriterLevel(w, opts.Compression)
 	}
 
-	fmt.Fprintf(w, `<svg version="1.1" width="%vmm" height="%vmm" viewBox="0 0 %v %v" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">`, dec(width), dec(height), dec(width), dec(height))
+	fmt.Fprintf(w, `<svg version="1.1" width="%v%s" height="%v%s" viewBox="0 0 %v %v" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">`, dec(width), opts.SizeUnits, dec(height), opts.SizeUnits, dec(width), dec(height))
 	return &SVG{
 		w:          w,
 		width:      width,
@@ -89,7 +91,11 @@ func (r *SVG) writeFonts() {
 			sfnt := f.SFNT
 			if r.opts.SubsetFonts {
 				glyphIDs := r.fontSubset[f].List()
-				sfnt = sfnt.Subset(glyphIDs, font.SubsetOptions{Tables: font.KeepMinTables})
+				sfntSubset, err := sfnt.Subset(glyphIDs, font.SubsetOptions{Tables: font.KeepMinTables})
+				if err == nil {
+					//	// TODO: report error?
+					sfnt = sfntSubset
+				}
 			}
 			fontProgram := sfnt.Write()
 
@@ -164,7 +170,7 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 	}
 
 	stroke := path
-	path = path.Transform(canvas.Identity.ReflectYAbout(r.height / 2.0).Mul(m))
+	path = path.Copy().Transform(canvas.Identity.ReflectYAbout(r.height / 2.0).Mul(m))
 	fmt.Fprintf(r.w, `<path d="%s`, path.ToSVG())
 
 	strokeUnsupported := false
@@ -197,9 +203,6 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 			if !style.Fill.IsColor() || style.Fill.Color != canvas.Black {
 				fmt.Fprintf(r.w, `" fill="`)
 				r.writePaint(r.w, style.Fill)
-				if style.Fill.IsColor() && style.Fill.Color.A != 255 {
-					fmt.Fprintf(r.w, `" fill-opacity="%v`, dec(float64(style.Fill.Color.A)/255.0))
-				}
 			}
 			if style.FillRule == canvas.EvenOdd {
 				fmt.Fprintf(r.w, `" fill-rule="evenodd`)
@@ -213,9 +216,6 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 			if !style.Fill.IsColor() || style.Fill.Color != canvas.Black {
 				fmt.Fprintf(b, ";fill:")
 				r.writePaint(b, style.Fill)
-				if style.Fill.IsColor() && style.Fill.Color.A != 255 {
-					fmt.Fprintf(b, ";fill-opacity:%v", dec(float64(style.Fill.Color.A)/255.0))
-				}
 			}
 			if style.FillRule == canvas.EvenOdd {
 				fmt.Fprintf(b, ";fill-rule:evenodd")
@@ -226,9 +226,6 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 		if style.HasStroke() && !strokeUnsupported {
 			fmt.Fprintf(b, `;stroke:`)
 			r.writePaint(b, style.Stroke)
-			if style.Stroke.IsColor() && style.Stroke.Color.A != 255 {
-				fmt.Fprintf(b, ";stroke-opacity:%v", dec(float64(style.Stroke.Color.A)/255.0))
-			}
 			if style.StrokeWidth != 1.0 {
 				fmt.Fprintf(b, ";stroke-width:%v", dec(style.StrokeWidth))
 			}
@@ -250,8 +247,8 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 				}
 			} else if miter, ok := style.StrokeJoiner.(canvas.MiterJoiner); ok && !math.IsNaN(miter.Limit) {
 				// a miter line join is the default
-				if !canvas.Equal(miter.Limit*2.0/style.StrokeWidth, 4.0) {
-					fmt.Fprintf(b, ";stroke-miterlimit:%v", dec(miter.Limit*2.0/style.StrokeWidth))
+				if !canvas.Equal(miter.Limit, 4.0) {
+					fmt.Fprintf(b, ";stroke-miterlimit:%v", dec(miter.Limit))
 				}
 			} else {
 				panic("SVG: line join not support")
@@ -285,9 +282,6 @@ func (r *SVG) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 		if !style.Stroke.IsColor() || style.Stroke.Color != canvas.Black {
 			fmt.Fprintf(r.w, `" fill="`)
 			r.writePaint(r.w, style.Stroke)
-			if style.Stroke.IsColor() && style.Stroke.Color.A != 255 {
-				fmt.Fprintf(r.w, `" fill-opacity="%v`, dec(float64(style.Stroke.Color.A)/255.0))
-			}
 		}
 		if style.FillRule == canvas.EvenOdd {
 			fmt.Fprintf(r.w, `" fill-rule="evenodd`)
@@ -340,9 +334,6 @@ func (r *SVG) writeFontStyle(face, faceMain *canvas.FontFace, rtl bool) {
 		if !face.Fill.Equal(faceMain.Fill) {
 			fmt.Fprintf(r.w, `;fill:`)
 			r.writePaint(r.w, face.Fill)
-			if face.Fill.IsColor() && face.Fill.Color.A != 255 {
-				fmt.Fprintf(r.w, `;fill-opacity:%v`, dec(float64(face.Fill.Color.A)/255.0))
-			}
 		}
 		if rtl {
 			fmt.Fprintf(r.w, `;direction:rtl`)
@@ -350,9 +341,6 @@ func (r *SVG) writeFontStyle(face, faceMain *canvas.FontFace, rtl bool) {
 	} else if differences == 1 && !face.Fill.Equal(faceMain.Fill) {
 		fmt.Fprintf(r.w, `" fill="`)
 		r.writePaint(r.w, face.Fill)
-		if face.Fill.IsColor() && face.Fill.Color.A != 255 {
-			fmt.Fprintf(r.w, `" fill-opacity="%v`, dec(float64(face.Fill.Color.A)/255.0))
-		}
 	} else if 0 < differences {
 		fmt.Fprintf(r.w, `" style="`)
 		buf := &bytes.Buffer{}
@@ -370,9 +358,6 @@ func (r *SVG) writeFontStyle(face, faceMain *canvas.FontFace, rtl bool) {
 		if !face.Fill.Equal(faceMain.Fill) {
 			fmt.Fprintf(buf, `;fill:`)
 			r.writePaint(r.w, face.Fill)
-			if face.Fill.IsColor() && face.Fill.Color.A != 255 {
-				fmt.Fprintf(buf, `;fill-opacity:%v`, dec(float64(face.Fill.Color.A)/255.0))
-			}
 		}
 		if rtl {
 			fmt.Fprintf(r.w, `;direction:rtl`)
@@ -425,9 +410,6 @@ func (r *SVG) RenderText(text *canvas.Text, m canvas.Matrix) {
 	if !faceMain.Fill.IsColor() || faceMain.Fill.Color != canvas.Black {
 		fmt.Fprintf(r.w, `;fill:`)
 		r.writePaint(r.w, faceMain.Fill)
-		if faceMain.Fill.IsColor() && faceMain.Fill.Color.A != 255 {
-			fmt.Fprintf(r.w, `;fill-opacity:%v`, dec(float64(faceMain.Fill.Color.A)/255.0))
-		}
 	}
 	if text.WritingMode != canvas.HorizontalTB {
 		if text.WritingMode == canvas.VerticalLR {
@@ -606,8 +588,6 @@ func (r *SVG) writePaint(w io.Writer, paint canvas.Paint) {
 	} else if paint.IsGradient() {
 		fmt.Fprintf(w, "url(#%v)", r.getPattern(paint.Gradient))
 	} else {
-		c := paint.Color
-		c.A = 255
-		fmt.Fprintf(w, "%v", canvas.CSSColor(c))
+		fmt.Fprintf(w, "%v", canvas.CSSColor(paint.Color))
 	}
 }

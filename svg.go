@@ -80,13 +80,13 @@ func (svg *svgParser) parseViewBox(attrWidth, attrHeight, attrViewBox string) (f
 			}
 		}
 	}
-	if attrWidth != "" {
-		width = svg.parseDimension(attrWidth, 0.0)
+	if attrWidth != "" && !strings.HasSuffix(attrWidth, "%") {
+		width = svg.parseDimension(attrWidth, 1.0)
 	} else {
 		width = (viewbox[2] - viewbox[0]) * 25.4 / 96.0
 	}
-	if attrHeight != "" {
-		height = svg.parseDimension(attrHeight, 0.0)
+	if attrHeight != "" && !strings.HasSuffix(attrHeight, "%") {
+		height = svg.parseDimension(attrHeight, 1.0)
 	} else {
 		height = (viewbox[3] - viewbox[1]) * 25.4 / 96.0
 	}
@@ -103,7 +103,6 @@ func (svg *svgParser) init(width, height float64, viewbox [4]float64) {
 	if 0.0 < (viewbox[2]-viewbox[0]) && 0.0 < (viewbox[3]-viewbox[1]) {
 		m := Identity.Scale(width/(viewbox[2]-viewbox[0]), height/(viewbox[3]-viewbox[1])).Translate(-viewbox[0], -viewbox[1])
 		svg.ctx.SetView(m)
-		svg.ctx.SetCoordView(m)
 	}
 	svg.ctx.SetStrokeJoiner(MiterJoiner{BevelJoin, svgDefaultState.strokeMiterLimit})
 	svg.state = svgDefaultState
@@ -356,6 +355,9 @@ func (svg *svgParser) parseAttributes(l *xml.Lexer) (xml.TokenType, []string, ma
 			break
 		}
 		val := l.AttrVal()
+		if len(val) < 2 {
+			break
+		}
 		val = val[1 : len(val)-1]
 		attrNames = append(attrNames, string(l.Text()))
 		attrs[string(l.Text())] = string(val)
@@ -385,10 +387,11 @@ func (svg *svgParser) parseTag(l *xml.Lexer) *svgTag {
 		} else if tt == xml.StartTagToken {
 			var attrNames []string
 			var attrs map[string]string
+			name := string(data[1:])
 			tt, attrNames, attrs = svg.parseAttributes(l)
 			tag := &svgTag{
 				parent:    parent,
-				name:      string(data[1:]),
+				name:      name,
 				attrNames: attrNames,
 				attrs:     attrs,
 			}
@@ -405,6 +408,19 @@ func (svg *svgParser) parseTag(l *xml.Lexer) *svgTag {
 				}
 			} else {
 				parent = tag
+			}
+
+			// Handle <style> being nested in <defs>. Adobe Illustrator
+			// does this, for example.
+			if name == "style" {
+				tt, data = l.Next()
+				if tt == xml.TextToken {
+					svg.parseStyle(data)
+					tt, data = l.Next()
+				} else {
+					svg.err = parse.NewErrorLexer(svg.z, "Bad style tag")
+				}
+				break
 			}
 		} else if tt == xml.EndTagToken {
 			if parent == nil {
@@ -470,16 +486,16 @@ func (svg *svgParser) parseDefs(l *xml.Lexer) {
 				rect := layer.path.FastBounds()
 				x1t, y1t, x2t, y2t := x1, y1, x2, y2
 				if x1p {
-					x1t = (rect.X + rect.W*x1t) * 25.4 / 96.0
+					x1t = (rect.X0 + rect.W()*x1t) * 25.4 / 96.0
 				}
 				if y1p {
-					y1t = (rect.Y + rect.H*y1t) * 25.4 / 96.0
+					y1t = (rect.Y0 + rect.H()*y1t) * 25.4 / 96.0
 				}
 				if x2p {
-					x2t = (rect.X + rect.W*x2t) * 25.4 / 96.0
+					x2t = (rect.X0 + rect.W()*x2t) * 25.4 / 96.0
 				}
 				if y2p {
-					y2t = (rect.Y + rect.H*y2t) * 25.4 / 96.0
+					y2t = (rect.Y0 + rect.H()*y2t) * 25.4 / 96.0
 				}
 				linearGradient := NewLinearGradient(Point{x1t, y1t}, Point{x2t, y2t})
 				linearGradient.Stops = stops
@@ -758,7 +774,8 @@ func (svg *svgParser) setAttribute(key, val string) {
 			miter.Limit = svg.state.strokeMiterLimit
 		}
 	case "transform":
-		svg.ctx.ComposeView(svg.parseTransform(val))
+		m := svg.parseTransform(val)
+		svg.ctx.ComposeView(m)
 	case "text-anchor":
 		svg.state.textAnchor = val
 	case "font-family":
@@ -789,8 +806,8 @@ func (svg *svgParser) getFontFace() *FontFace {
 		}
 		svg.fonts[svg.state.fontFamily] = fontFamily
 	}
-	fontSize := svg.state.fontSize * 72.0 / 25.4 // pt/mm
-	return fontFamily.Face(fontSize)
+	fontSize := svg.state.fontSize * ptPerMm
+	return fontFamily.Face(fontSize, svg.ctx.Style.Fill.Color)
 }
 
 func (svg *svgParser) drawShape(tag string, attrs map[string]string) {
@@ -828,20 +845,31 @@ func (svg *svgParser) drawShape(tag string, attrs map[string]string) {
 		svg.ctx.DrawPath(0.0, 0.0, p)
 	case "line":
 		p := &Path{}
-		x1, _ := strconv.ParseInt(attrs["x1"], 10, 64)
-		y1, _ := strconv.ParseInt(attrs["y1"], 10, 64)
-		x2, _ := strconv.ParseInt(attrs["x2"], 10, 64)
-		y2, _ := strconv.ParseInt(attrs["y2"], 10, 64)
+		x1 := svg.parseDimension(attrs["x1"], svg.width)
+		y1 := svg.parseDimension(attrs["y1"], svg.height)
+		x2 := svg.parseDimension(attrs["x2"], svg.width)
+		y2 := svg.parseDimension(attrs["y2"], svg.height)
 
-		p.MoveTo(float64(x1), float64(y1))
-		p.LineTo(float64(x2), float64(y2))
+		p.MoveTo(x1, y1)
+		p.LineTo(x2, y2)
 		svg.ctx.DrawPath(0.0, 0.0, p)
 	case "rect":
 		x := svg.parseDimension(attrs["x"], svg.width)
 		y := svg.parseDimension(attrs["y"], svg.height)
 		width := svg.parseDimension(attrs["width"], svg.width)
 		height := svg.parseDimension(attrs["height"], svg.height)
-		svg.ctx.DrawPath(x, y, Rectangle(width, height))
+		if attrs["rx"] == "" && attrs["ry"] == "" {
+			svg.ctx.DrawPath(x, y, Rectangle(width, height))
+		} else {
+			// TODO: handle both rx and ry
+			var r float64
+			if attrs["ry"] == "" {
+				r = svg.parseDimension(attrs["rx"], svg.width)
+			} else {
+				r = svg.parseDimension(attrs["ry"], svg.height)
+			}
+			svg.ctx.DrawPath(x, y, RoundedRectangle(width, height, r))
+		}
 	case "text":
 		svg.state.textX = svg.parseDimension(attrs["x"], svg.width)
 		svg.state.textY = svg.parseDimension(attrs["y"], svg.height)

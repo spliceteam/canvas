@@ -3,7 +3,6 @@ package canvas
 import (
 	"fmt"
 	"image/color"
-	"io/ioutil"
 	"log"
 	"math"
 	"os"
@@ -221,9 +220,8 @@ func FindSystemFont(name string, style FontStyle) (string, bool) {
 	if systemFonts.SystemFonts == nil {
 		systemFonts.SystemFonts, _ = font.FindSystemFonts(font.DefaultFontDirs())
 	}
-	systemFonts.Unlock()
-
 	font, ok := systemFonts.Match(name, font.ParseStyleCSS(style.CSS(), style.Italic()))
+	systemFonts.Unlock()
 	return font.Filename, ok
 }
 
@@ -254,7 +252,7 @@ func LoadSystemFont(name string, style FontStyle) (*Font, error) {
 
 // LoadFontFile loads a font from a file.
 func LoadFontFile(filename string, style FontStyle) (*Font, error) {
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load font file '%s': %w", filename, err)
 	}
@@ -263,7 +261,7 @@ func LoadFontFile(filename string, style FontStyle) (*Font, error) {
 
 // LoadFontCollection loads a font from a collection file and uses the font at the specified index.
 func LoadFontCollection(filename string, index int, style FontStyle) (*Font, error) {
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load font file '%s': %w", filename, err)
 	}
@@ -329,7 +327,6 @@ func (f *Font) SetVariations(variations string) {
 
 // SetFeatures sets the font features (not yet supported).
 func (f *Font) SetFeatures(features string) {
-	// TODO: support font features
 	f.features = features
 }
 
@@ -667,6 +664,7 @@ func (m FontMetrics) String() string {
 
 // Metrics returns the font metrics. See https://developer.apple.com/library/archive/documentation/TextFonts/Conceptual/CocoaTextArchitecture/Art/glyph_metrics_2x.png for an explanation of the different metrics.
 func (face *FontFace) Metrics() FontMetrics {
+	// TODO: use resolution
 	sfnt := face.Font.SFNT
 	ascender, descender, lineGap := sfnt.VerticalMetrics()
 	return FontMetrics{

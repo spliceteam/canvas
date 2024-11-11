@@ -1,6 +1,6 @@
 ![Canvas](https://raw.githubusercontent.com/tdewolff/canvas/master/resources/title/title.png)
 
-[![API reference](https://img.shields.io/badge/godoc-reference-5272B4)](https://pkg.go.dev/github.com/tdewolff/canvas?tab=doc) [![User guide](https://img.shields.io/badge/user-guide-5272B4)](https://github.com/tdewolff/canvas/wiki) [![Go Report Card](https://goreportcard.com/badge/github.com/tdewolff/canvas)](https://goreportcard.com/report/github.com/tdewolff/canvas) [![Coverage Status](https://coveralls.io/repos/github/tdewolff/canvas/badge.svg?branch=master)](https://coveralls.io/github/tdewolff/canvas?branch=master) [![Donate](https://img.shields.io/badge/patreon-donate-DFB317)](https://www.patreon.com/tdewolff)
+[![API reference](https://img.shields.io/badge/godoc-reference-5272B4)](https://pkg.go.dev/github.com/tdewolff/canvas?tab=doc) [![User guide](https://img.shields.io/badge/user-guide-5272B4)](https://github.com/tdewolff/canvas/wiki) [![Go Report Card](https://goreportcard.com/badge/github.com/tdewolff/canvas)](https://goreportcard.com/report/github.com/tdewolff/canvas) [![Coverage Status](https://coveralls.io/repos/github/tdewolff/canvas/badge.svg?branch=master)](https://coveralls.io/github/tdewolff/canvas?branch=master)
 
 **[API documentation](https://pkg.go.dev/github.com/tdewolff/canvas?tab=doc)**
 
@@ -15,44 +15,32 @@ Canvas is a common vector drawing target that can output SVG, PDF, EPS, raster i
 **Figure 1**: top-left you can see text being fitted into a box, justified using Donald Knuth's linea breaking algorithm to stretch the spaces between words to fill the whole width. You can observe a variety of styles and text decorations applied, as well as support for LTR/RTL mixing and complex scripts. In the bottom-right the word "stroke" is being stroked and drawn as a path. Top-right we see a LaTeX formula that has been converted to a path. Left of that we see an ellipse showcasing precise dashing, notably the length of e.g. the short dash is equal wherever it is on the curve. Note that the dashes themselves are elliptical arcs as well (thus exactly precise even if magnified greatly). To the right we see a closed polygon of four points being smoothed by cubic Béziers that are smooth along the whole path, and the blue line on the left shows a smoothed open path. On the bottom you can see a rotated rasterized image. The bottom-left shows path boolean operations. The result is equivalent for all renderers (PNG, PDF, SVG, etc.).
 
 ### Sponsors
-Please see https://www.patreon.com/tdewolff for ways to contribute, otherwise please contact me directly!
+I'm actively looking for support in the form of donations or sponsorships to keep developing this library and highly appreciate any gesture. Please see the Sponsors button in GitHub for ways to contribute, or contact me directly.
 
 ## State
 Whether this library is ready for production environments is up to your own judgment. In general, this library is written thoughtfully and complete, but the scope of this work is so big and the implementation can be quite complex that inevitably it must have a great amount of bugs. Effort was put in writing unit and fuzz tests so that I suspect only special use-cases will stumble into bugs, but coverage is still lacking. As time permits, work is done to flesh-out functionality, find bugs, and optimize code. Optimization could be in execution time / reducing code complexity, reducing memory footprint, or reducing the length of paths from operation.
 
 Execution performance is actually really good, especially the rasterizer is highly optimized with ASM. See for example a comparison of an extreme case in https://github.com/tdewolff/canvas/issues/280#issuecomment-1995990038, where this library is at least twice as fast as existing solutions, and can handle bigger images than the likes of Inkscape and Cairo.
 
+The path intersection code and path boolean operation code is quite complete and fast, and more importantly has a time complexity of O(n log n). It may suffer from numerical precision which can be avoided using `Path.Gridsnap` beforehand.
+
 Please issue bug reports or feature requests to help this library mature! All help is appreciated. Also see [Wiki - Planning](https://github.com/tdewolff/canvas/wiki/Planning) for an inexhaustive list of ideas and TODOs.
-
-## Recent changes
-
-- `Context` view and coordinate view have been altered. `View` now doesn't affect the coordinate view/system. To achieve the same as before, replace `ctx.SetView(m)` by `ctx.SetView(m); ctx.SetCoordView(m)`. The change makes coordinate systems more intuitive when using in combination with views, the given coordinate reflects the coordinate where it is drawn irrespective of the view.
-- `Flatten()`, `Stroke()`, and `Offset()` now require an additional `tolerance` variable, which used to be set by the `Tolerance` parameter with a default value of `0.01`. To get the original behaviour, use `Flatten(0.01)`, `Stroke(width, capper, joiner, 0.01)`, and `Offset(width, fillRule, 0.01)`.
-- `Interior()` is renamed to `Fills()`
-- `ParseSVG` and `MustParseSVG` are now `ParseSVGPath` and `MustParseSVGPath` to avoid confusion that it parses entire SVGs
-- Instead of `MiterClipJoin(limit)` use `MiterClipJoiner{nil, limit}` or `MiterClipJoin` to use the default limit of `4.0`, same for `ArcsClipJoin`
-- `Path.Segments` has been deprecated, please use `Path.Scanner`
-- `*LocalFont` have been deprecated, please use `*SystemFont`
-- `RichText.SetFaceSpan` has been deprecated
-- `RichText.Add` has been deprecated, please use `RichText.WriteFace`
-- `RichText.Add*` have been deprecated, please use `RichText.Write*`
-- `Path.Complex` has been renamed as `Path.HasSubpaths`
 
 ## Features
 
-- Path segment types: MoveTo, LineTo, QuadTo, CubeTo, ArcTo, Close
+- Path segment types: MoveTo, LineTo, QuadTo, CubeTo, ArcTo, Close (https://github.com/tdewolff/canvas/wiki/Paths)
 - Precise path flattening, stroking, and dashing for all segment type uing papers (see below)
 - Smooth spline generation through points for open and closed paths
-- Path boolean operations: AND, OR, XOR, NOT, Divide
+- Path boolean operations: AND, OR, XOR, NOT, Divide (https://github.com/tdewolff/canvas/wiki/Boolean-operations)
 - LaTeX to path conversion (native Go and CGO implementations available)
-- Font formats support
+- Font formats support (https://github.com/tdewolff/canvas/wiki/Fonts-&-Text)
 - - SFNT (such as TTF, OTF, WOFF, WOFF2, EOT) supporting TrueType, CFF, and CFF2 tables
 - HarfBuzz for text shaping (native Go and CGO implementations available)
 - FriBidi for text bidirectionality (native Go and CGO implementations available)
 - Donald Knuth's line breaking algorithm for text layout
 - sRGB compliance (use `SRGBColorSpace`, only available for rasterizer)
 - Font rendering with gamma correction of 1.43
-- Rendering targets
+- Rendering targets (https://github.com/tdewolff/canvas/wiki/Renderers)
 - - Raster images (PNG, GIF, JPEG, TIFF, BMP, WEBP)
 - - PDF
 - - SVG and SVGZ
@@ -104,7 +92,7 @@ This is a non-exhaustive list of library users I've come across. PRs are welcome
 - https://github.com/html2any/layout (flex layout)
 - https://github.com/iand/genster (family trees)
 - https://github.com/jansorg/marketplace-stats (reports for JetBrains marketplace)
-- https://github.com/kpym/marianne (French repulic logo)
+- https://github.com/kpym/marianne (French republic logo)
 - https://github.com/mrmelon54/favicon (Favicon generator)
 - https://github.com/namsor/go-qrcode (QR code encoder)
 - https://github.com/octohelm/gio-compose (UI component solution for Gio)
@@ -124,7 +112,7 @@ This is a non-exhaustive list of library users I've come across. PRs are welcome
 - [Numerically stable quadratic formula](https://math.stackexchange.com/questions/866331/numerically-stable-algorithm-for-solving-the-quadratic-equation-when-a-is-very/2007723#2007723)
 - [Quadratic Bézier length](https://malczak.linuxpl.com/blog/quadratic-bezier-curve-length/)
 - [Bézier spline through open path](https://www.particleincell.com/2012/bezier-splines/)
-- [Bézier spline through closed path](http://www.jacos.nl/jacos_html/spline/circular/index.html)
+- [Bézier spline through closed path](https://www.jacos.nl/jacos_html/spline/circular/index.html)
 - [Point inclusion in polygon test](https://wrf.ecse.rpi.edu/Research/Short_Notes/pnpoly.html)
 
 #### My own
@@ -138,8 +126,9 @@ This is a non-exhaustive list of library users I've come across. PRs are welcome
 - [M. Goldapp, Approximation of circular arcs by cubic polynomials, Computer Aided Geometric Design 8 (1991), p. 227--238](https://doi.org/10.1016/0167-8396%2891%2990007-X)
 - [L. Maisonobe, Drawing and elliptical arc using polylines, quadratic or cubic Bézier curves (2003)](https://spaceroots.org/documents/ellipse/elliptical-arc.pdf)
 - [S.H. Kim and Y.J. Ahn, An approximation of circular arcs by quartic Bezier curves, Computer-Aided Design 39 (2007, p. 490--493)](https://doi.org/10.1016/j.cad.2007.01.004)
-- D.E. Knuth and M.F. Plass, Breaking Paragraphs into Lines, Software: Practive and Experience 11 (1981), p. 1119--1184
-- L. Subramaniam, Partition of a non-simple polygon into simple pologons, 2003
+- D.E. Knuth and M.F. Plass, Breaking Paragraphs into Lines, Software: Practice and Experience 11 (1981), p. 1119--1184
+- L. Subramaniam, Partition of a non-simple polygon into simple polygons, 2003
+- [A simple algorithm for Boolean operations on polygons](https://doi.org/10.1016/j.advengsoft.2013.04.004)
 
 ## License
 

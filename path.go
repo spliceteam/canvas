@@ -42,7 +42,23 @@ func (fillRule FillRule) Fills(windings int) bool {
 	return false
 }
 
+func (fillRule FillRule) String() string {
+	switch fillRule {
+	case NonZero:
+		return "NonZero"
+	case EvenOdd:
+		return "EvenOdd"
+	case Positive:
+		return "Positive"
+	case Negative:
+		return "Negative"
+	}
+	return fmt.Sprintf("FillRule(%d)", fillRule)
+}
+
 // Command values as powers of 2 so that the float64 representation is exact
+// TODO: make CloseCmd a LineTo + CloseCmd, where CloseCmd is only a command value, no coordinates
+// TODO: optimize command memory layout in paths: we need three bits to represent each command, thus 6 to specify command going forward and going backward. The remaining 58 bits, or 28 per direction, should specify the index into Path.d of the end of the sequence of coordinates. MoveTo should have an index to the end of the subpath. Use math.Float64bits. For long flat paths this will reduce memory usage in half since besides all coordinates, the only overhead is: 64 bits first MoveTo, 64 bits end of MoveTo and start of LineTo, 64 bits end of LineTo and start of Close, 64 bits end of Close.
 const (
 	MoveToCmd = 1.0 << iota //  1.0
 	LineToCmd               //  2.0
@@ -52,17 +68,13 @@ const (
 	CloseCmd                // 32.0
 )
 
+var cmdLens = [6]int{4, 4, 6, 8, 8, 4}
+
 // cmdLen returns the number of values (float64s) the path command contains.
 func cmdLen(cmd float64) int {
-	switch cmd {
-	case MoveToCmd, LineToCmd, CloseCmd:
-		return 4
-	case QuadToCmd:
-		return 6
-	case CubeToCmd, ArcToCmd:
-		return 8
-	}
-	panic(fmt.Sprintf("unknown path command '%f'", cmd))
+	// extract only part of the exponent, this is 3 times faster than using a switch on cmd
+	n := uint8((math.Float64bits(cmd)&0x0FF0000000000000)>>52) + 1
+	return cmdLens[n]
 }
 
 // toArcFlags converts to the largeArc and sweep boolean flags given its value in the path.
@@ -84,11 +96,34 @@ func fromArcFlags(large, sweep bool) float64 {
 	return f
 }
 
+type Paths []*Path
+
+func (ps Paths) Empty() bool {
+	for _, p := range ps {
+		if !p.Empty() {
+			return false
+		}
+	}
+	return true
+}
+
 // Path defines a vector path in 2D using a series of commands (MoveTo, LineTo, QuadTo, CubeTo, ArcTo and Close). Each command consists of a number of float64 values (depending on the command) that fully define the action. The first value is the command itself (as a float64). The last two values is the end point position of the pen after the action (x,y). QuadTo defined one control point (x,y) in between, CubeTo defines two control points, and ArcTo defines (rx,ry,phi,large+sweep) i.e. the radius in x and y, its rotation (in radians) and the large and sweep booleans in one float64.
 // Only valid commands are appended, so that LineTo has a non-zero length, QuadTo's and CubeTo's control point(s) don't (both) overlap with the start and end point, and ArcTo has non-zero radii and has non-zero length. For ArcTo we also make sure the angle is in the range [0, 2*PI) and we scale the radii up if they appear too small to fit the arc.
 type Path struct {
 	d []float64
 	// TODO: optimization: cache bounds and path len until changes (clearCache()), set bounds directly for predefined shapes
+	// TODO: cache index last MoveTo, cache if path is settled?
+}
+
+// NewPathFromData returns a new path using the raw data.
+func NewPathFromData(d []float64) *Path {
+	return &Path{d}
+}
+
+// Reset clears the path but retains the same memory. This can be used in loops where you append
+// and process paths every iteration, and avoid new memory allocations.
+func (p *Path) Reset() {
+	p.d = p.d[:0]
 }
 
 // Data returns the raw path data.
@@ -98,7 +133,7 @@ func (p *Path) Data() []float64 {
 
 // Empty returns true if p is an empty path or consists of only MoveTos and Closes.
 func (p *Path) Empty() bool {
-	return len(p.d) <= cmdLen(MoveToCmd)
+	return p == nil || len(p.d) <= cmdLen(MoveToCmd)
 }
 
 // Equals returns true if p and q are equal within tolerance Epsilon.
@@ -159,14 +194,8 @@ func (p *Path) PointClosed() bool {
 	return 6 < len(p.d) && p.d[len(p.d)-1] == CloseCmd && Equal(p.d[len(p.d)-7], p.d[len(p.d)-3]) && Equal(p.d[len(p.d)-6], p.d[len(p.d)-2])
 }
 
-// XMonotone returns true if the path is x-monotone, that is each path segment is either increasing or decreasing with X while moving across the segment. This is always true for line segments, but may not be the case for Beziér or arc segments.
-func (p *Path) XMonotone() bool {
-	// TODO: implement XMonotone
-	panic("not implemented")
-}
-
 // HasSubpaths returns true when path p has subpaths.
-// TODO: naming right? A simple path would not self-intersect. Add XMonotone and Flat as well
+// TODO: naming right? A simple path would not self-intersect. Add IsXMonotone and IsFlat as well?
 func (p *Path) HasSubpaths() bool {
 	for i := 0; i < len(p.d); {
 		if p.d[i] == MoveToCmd && i != 0 {
@@ -179,8 +208,19 @@ func (p *Path) HasSubpaths() bool {
 
 // Copy returns a copy of p.
 func (p *Path) Copy() *Path {
-	q := &Path{}
-	q.d = append(q.d, p.d...)
+	q := &Path{d: make([]float64, len(p.d))}
+	copy(q.d, p.d)
+	return q
+}
+
+// CopyTo returns a copy of p, using the memory of path q.
+func (p *Path) CopyTo(q *Path) *Path {
+	if q == nil || len(q.d) < len(p.d) {
+		q.d = make([]float64, len(p.d))
+	} else {
+		q.d = q.d[:len(p.d)]
+	}
+	copy(q.d, p.d)
 	return q
 }
 
@@ -195,13 +235,23 @@ func (p *Path) Len() int {
 }
 
 // Append appends path q to p and returns a new path if successful (otherwise either p or q are returned).
-func (p *Path) Append(q *Path) *Path {
-	if q == nil || q.Empty() {
-		return p
-	} else if p == nil || p.Empty() {
-		return q
+func (p *Path) Append(qs ...*Path) *Path {
+	n := len(p.d)
+	for _, q := range qs {
+		if q != nil {
+			n += len(q.d)
+		}
 	}
-	return &Path{append(p.d, q.d...)}
+	r := &Path{make([]float64, 0, n)}
+	if !p.Empty() {
+		r.d = append(r.d, p.d...)
+	}
+	for _, q := range qs {
+		if !q.Empty() {
+			r.d = append(r.d, q.d...)
+		}
+	}
+	return r
 }
 
 // Join joins path q to p and returns a new path if successful (otherwise either p or q are returned). It's like executing the commands in q to p in sequence, where if the first MoveTo of q doesn't coincide with p, or if p ends in Close, it will fallback to appending the paths.
@@ -291,76 +341,112 @@ func (p *Path) Coords() []Point {
 	return coords
 }
 
-// CoordDirections returns the direction of the segment start/end points. It will return the average direction at the intersection of two end points, and for an open path it will simply return the direction of the start and end points of the path.
-func (p *Path) CoordDirections() []Point {
-	dirs := []Point{}
-	var first int
-	var closed bool
-	var start, end Point
-	var n1Prev, n0, n1 Point
+// direction returns the direction of the path at the given index into Path.d and t in [0.0,1.0]. Path must not contain subpaths, and will return the path's starting direction when i points to a MoveToCmd, or the path's final direction when i points to a CloseCmd of zero-length.
+func (p *Path) direction(i int, t float64) Point {
+	last := len(p.d)
+	if p.d[last-1] == CloseCmd && (Point{p.d[last-cmdLen(CloseCmd)-3], p.d[last-cmdLen(CloseCmd)-2]}).Equals(Point{p.d[last-3], p.d[last-2]}) {
+		// point-closed
+		last -= cmdLen(CloseCmd)
+	}
+
+	if i == 0 {
+		// get path's starting direction when i points to MoveTo
+		i = 4
+		t = 0.0
+	} else if i < len(p.d) && i == last {
+		// get path's final direction when i points to zero-length Close
+		i -= cmdLen(p.d[i-1])
+		t = 1.0
+	}
+	if i < 0 || len(p.d) <= i || last < i+cmdLen(p.d[i]) {
+		return Point{}
+	}
+
+	cmd := p.d[i]
+	var start Point
+	if i == 0 {
+		start = Point{p.d[last-3], p.d[last-2]}
+	} else {
+		start = Point{p.d[i-3], p.d[i-2]}
+	}
+
+	i += cmdLen(cmd)
+	end := Point{p.d[i-3], p.d[i-2]}
+	switch cmd {
+	case LineToCmd, CloseCmd:
+		return end.Sub(start).Norm(1.0)
+	case QuadToCmd:
+		cp := Point{p.d[i-5], p.d[i-4]}
+		return quadraticBezierDeriv(start, cp, end, t).Norm(1.0)
+	case CubeToCmd:
+		cp1 := Point{p.d[i-7], p.d[i-6]}
+		cp2 := Point{p.d[i-5], p.d[i-4]}
+		return cubicBezierDeriv(start, cp1, cp2, end, t).Norm(1.0)
+	case ArcToCmd:
+		rx, ry, phi := p.d[i-7], p.d[i-6], p.d[i-5]
+		large, sweep := toArcFlags(p.d[i-4])
+		_, _, theta0, theta1 := ellipseToCenter(start.X, start.Y, rx, ry, phi, large, sweep, end.X, end.Y)
+		theta := theta0 + t*(theta1-theta0)
+		return ellipseDeriv(rx, ry, phi, sweep, theta).Norm(1.0)
+	}
+	return Point{}
+}
+
+func (p *Path) Direction(seg int, t float64) Point {
+	if len(p.d) <= 4 {
+		return Point{}
+	}
+
+	curSeg := 0
+	iStart, iSeg, iEnd := 0, 0, 0
 	for i := 0; i < len(p.d); {
 		cmd := p.d[i]
+		if cmd == MoveToCmd {
+			if seg < curSeg {
+				pi := &Path{p.d[iStart:iEnd]}
+				return pi.direction(iSeg-iStart, t)
+			}
+			iStart = i
+		}
+		if seg == curSeg {
+			iSeg = i
+		}
 		i += cmdLen(cmd)
-
-		start = end
-		end = Point{p.d[i-3], p.d[i-2]}
-		if cmd == CloseCmd && start.Equals(end) {
-			closed = true
-			continue
-		}
-
-		n1Prev = n1
-		switch cmd {
-		case LineToCmd, CloseCmd:
-			n := end.Sub(start).Norm(1.0)
-			n0, n1 = n, n
-		case QuadToCmd, CubeToCmd:
-			var cp1, cp2 Point
-			if cmd == QuadToCmd {
-				cp := Point{p.d[i-5], p.d[i-4]}
-				cp1, cp2 = quadraticToCubicBezier(start, cp, end)
-			} else {
-				cp1 = Point{p.d[i-7], p.d[i-6]}
-				cp2 = Point{p.d[i-5], p.d[i-4]}
-			}
-			n0 = cubicBezierNormal(start, cp1, cp2, end, 0.0, 1.0).Rot90CCW()
-			n1 = cubicBezierNormal(start, cp1, cp2, end, 1.0, 1.0).Rot90CCW()
-		case ArcToCmd:
-			rx, ry, phi := p.d[i-7], p.d[i-6], p.d[i-5]
-			large, sweep := toArcFlags(p.d[i-4])
-			_, _, theta0, theta1 := ellipseToCenter(start.X, start.Y, rx, ry, phi, large, sweep, end.X, end.Y)
-			n0 = ellipseNormal(rx, ry, phi, sweep, theta0, 1.0).Rot90CCW()
-			n1 = ellipseNormal(rx, ry, phi, sweep, theta1, 1.0).Rot90CCW()
-		}
-
-		if cmd != MoveToCmd {
-			dir := n0
-			if first < len(dirs) {
-				dir = n1Prev.Add(n0).Norm(1.0)
-			}
-			dirs = append(dirs, dir)
-		} else if first < len(dirs) {
-			// MoveTo, start of new subpath
-			dir := n1Prev
-			if closed {
-				dir = n1Prev.Add(dirs[first]).Norm(1.0)
-				dirs[first] = dir
-			}
-			dirs = append(dirs, dir)
-			first = len(dirs) - 1
-		}
-		closed = cmd == CloseCmd
 	}
-	if first < len(dirs) {
-		dir := n1
-		if closed {
-			dir = n1.Add(dirs[first]).Norm(1.0)
-			dirs[first] = dir
+	return Point{} // if segment doesn't exist
+}
+
+// CoordDirections returns the direction of the segment start/end points. It will return the average direction at the intersection of two end points, and for an open path it will simply return the direction of the start and end points of the path.
+func (p *Path) CoordDirections() []Point {
+	if len(p.d) <= 4 {
+		return []Point{{}}
+	}
+	last := len(p.d)
+	if p.d[last-1] == CloseCmd && (Point{p.d[last-cmdLen(CloseCmd)-3], p.d[last-cmdLen(CloseCmd)-2]}).Equals(Point{p.d[last-3], p.d[last-2]}) {
+		// point-closed
+		last -= cmdLen(CloseCmd)
+	}
+
+	dirs := []Point{}
+	var closed bool
+	var dirPrev Point
+	for i := 4; i < last; {
+		cmd := p.d[i]
+		dir := p.direction(i, 0.0)
+		if i == 0 {
+			dirs = append(dirs, dir)
+		} else {
+			dirs = append(dirs, dirPrev.Add(dir).Norm(1.0))
 		}
-		dirs = append(dirs, dir)
-	} else if len(dirs) == 0 && 0 < len(p.d) {
-		// path is one MoveTo
-		dirs = append(dirs, Point{})
+		dirPrev = p.direction(i, 1.0)
+		closed = cmd == CloseCmd
+		i += cmdLen(cmd)
+	}
+	if closed {
+		dirs[0] = dirs[0].Add(dirPrev).Norm(1.0)
+		dirs = append(dirs, dirs[0])
+	} else {
+		dirs = append(dirs, dirPrev)
 	}
 	return dirs
 }
@@ -388,10 +474,26 @@ func (p *Path) LineTo(x, y float64) {
 		if cmdLen(LineToCmd) < len(p.d) {
 			prevStart = Point{p.d[len(p.d)-cmdLen(LineToCmd)-3], p.d[len(p.d)-cmdLen(LineToCmd)-2]}
 		}
-		if Equal(end.Sub(start).AngleBetween(start.Sub(prevStart)), 0.0) {
-			p.d[len(p.d)-3] = x
-			p.d[len(p.d)-2] = y
-			return
+
+		// divide by length^2 since otherwise the perpdot between very small segments may be
+		// below Epsilon
+		da := start.Sub(prevStart)
+		db := end.Sub(start)
+		div := da.PerpDot(db)
+		if length := da.Length() * db.Length(); Equal(div/length, 0.0) {
+			// lines are parallel
+			extends := false
+			if da.Y < da.X {
+				extends = math.Signbit(da.X) == math.Signbit(db.X)
+			} else {
+				extends = math.Signbit(da.Y) == math.Signbit(db.Y)
+			}
+			if extends {
+				//if Equal(end.Sub(start).AngleBetween(start.Sub(prevStart)), 0.0) {
+				p.d[len(p.d)-3] = x
+				p.d[len(p.d)-2] = y
+				return
+			}
 		}
 	}
 
@@ -546,6 +648,7 @@ func (p *Path) Close() {
 	p.d = append(p.d, CloseCmd, end.X, end.Y, CloseCmd)
 }
 
+// optimizeClose removes a superfluous first line segment in-place of a subpath. If both the first and last segment are line segments and are colinear, move the start of the path forward one segment
 func (p *Path) optimizeClose() {
 	if len(p.d) == 0 || p.d[len(p.d)-1] != CloseCmd {
 		return
@@ -565,7 +668,7 @@ func (p *Path) optimizeClose() {
 
 	if p.d[iMoveTo] == MoveToCmd && p.d[iMoveTo+cmdLen(MoveToCmd)] == LineToCmd && iMoveTo+cmdLen(MoveToCmd)+cmdLen(LineToCmd) < len(p.d)-cmdLen(CloseCmd) {
 		// replace Close + MoveTo + LineTo by Close + MoveTo if equidirectional
-		// move Close and MoveTo backward or forward along the path
+		// move Close and MoveTo forward along the path
 		start := Point{p.d[len(p.d)-cmdLen(CloseCmd)-3], p.d[len(p.d)-cmdLen(CloseCmd)-2]}
 		nextEnd := Point{p.d[iMoveTo+cmdLen(MoveToCmd)+cmdLen(LineToCmd)-3], p.d[iMoveTo+cmdLen(MoveToCmd)+cmdLen(LineToCmd)-2]}
 		if Equal(end.Sub(start).AngleBetween(nextEnd.Sub(end)), 0.0) {
@@ -621,35 +724,55 @@ func (p *Path) simplifyToCoords() []Point {
 	return coords
 }
 
-// windings counts intersections of ray with path. Paths that cross downwards are negative and upwards are positive. Don't count intersections on the boundary.
-func windings(zs []PathIntersection) (int, bool) {
-	n := 0.0
+// windings counts intersections of ray with path. Paths that cross downwards are negative and upwards are positive. It returns the windings excluding the start position and the windings of the start position itself. If the windings of the start position is not zero, the start position is on a boundary.
+func windings(zs []Intersection) (int, bool) {
+	// There are four particular situations to be aware of. Whenever the path is horizontal it
+	// will be parallel to the ray, and usually overlapping. Either we have:
+	// - a starting point to the left of the overlapping section: ignore the overlapping
+	//   intersections so that it appears as a regular intersection, albeit at the endpoints
+	//   of two segments, which may either cancel out to zero (top or bottom edge) or add up to
+	//   1 or -1 if the path goes upwards or downwards respectively before/after the overlap.
+	// - a starting point on the left-hand corner of an overlapping section: ignore if either
+	//   intersection of an endpoint pair (t=0,t=1) is overlapping, but count for nb upon
+	//   leaving the overlap.
+	// - a starting point in the middle of an overlapping section: same as above
+	// - a starting point on the right-hand corner of an overlapping section: intersections are
+	//   tangent and thus already ignored for n, but for nb we should ignore the intersection with
+	//   a 0/180 degree direction, and count the other
+
+	n := 0
 	boundary := false
-	for _, z := range zs {
-		d := 1.0
-		if Equal(z.T, 0.0) || Equal(z.T, 1.0) {
-			d /= 2.0 // count half to not count twice
-		}
-		if !z.Parallel {
-			if z.Into {
-				d = -d // path goes downwards
-			}
-		} else {
-			// Horizontal boundary, parallels give two intersections. Bend downwards virtually to create intersections that cancel out.
-			if Equal(z.T, 0.0) {
-				d = -d
-			} else if !Equal(z.T, 1.0) {
-				d = 0.0
-			}
+	for i := 0; i < len(zs); i++ {
+		z := zs[i]
+		if z.T[0] == 0.0 {
+			boundary = true
+			continue
 		}
 
-		if z.Tangent {
-			boundary = true
+		d := 1
+		if z.Into() {
+			d = -1 // downwards
+		}
+		if z.T[1] != 0.0 && z.T[1] != 1.0 {
+			if !z.Same {
+				n += d
+			}
 		} else {
-			n += d
+			if i+1 == len(zs) {
+				for i, z := range zs {
+					fmt.Println(i, z)
+				}
+			}
+			same := z.Same || zs[i+1].Same
+			if !same {
+				if z.Into() == zs[i+1].Into() {
+					n += d
+				}
+			}
+			i++
 		}
 	}
-	return int(n), boundary // n is integer
+	return n, boundary
 }
 
 // Windings returns the number of windings at the given point, i.e. the sum of windings for each time a ray from (x,y) towards (∞,y) intersects the path. Counter clock-wise intersections count as positive, while clock-wise intersections count as negative. Additionally, it returns whether the point is on a path's boundary (which counts as being on the exterior).
@@ -658,8 +781,7 @@ func (p *Path) Windings(x, y float64) (int, bool) {
 	boundary := false
 	for _, pi := range p.Split() {
 		zs := pi.RayIntersections(x, y)
-		ni, boundaryi := windings(zs)
-		if boundaryi {
+		if ni, boundaryi := windings(zs); boundaryi {
 			boundary = true
 		} else {
 			n += ni
@@ -668,7 +790,7 @@ func (p *Path) Windings(x, y float64) (int, bool) {
 	return n, boundary
 }
 
-// Crossings returns the number of crossings wiht the path from the given point outwards, i.e. the number of times a ray from (x,y) towards (∞,y) intersects the path. Additionally, it returns whether the point is on a path's boundary (which does not count towards the number of crossings).
+// Crossings returns the number of crossings with the path from the given point outwards, i.e. the number of times a ray from (x,y) towards (∞,y) intersects the path. Additionally, it returns whether the point is on a path's boundary (which does not count towards the number of crossings).
 func (p *Path) Crossings(x, y float64) (int, bool) {
 	n := 0
 	boundary := false
@@ -676,15 +798,15 @@ func (p *Path) Crossings(x, y float64) (int, bool) {
 		// Count intersections of ray with path. Count half an intersection on boundaries.
 		ni := 0.0
 		for _, z := range pi.RayIntersections(x, y) {
-			if z.Tangent {
+			if z.T[0] == 0.0 {
 				boundary = true
-			} else if !z.Parallel {
-				if Equal(z.T, 0.0) || Equal(z.T, 1.0) {
+			} else if !z.Same {
+				if z.T[1] == 0.0 || z.T[1] == 1.0 {
 					ni += 0.5
 				} else {
 					ni += 1.0
 				}
-			} else if Equal(z.T, 0.0) || Equal(z.T, 1.0) {
+			} else if z.T[1] == 0.0 || z.T[1] == 1.0 {
 				ni -= 0.5
 			}
 		}
@@ -693,169 +815,95 @@ func (p *Path) Crossings(x, y float64) (int, bool) {
 	return n, boundary
 }
 
-// Contains returns whether the path contains the point (x,y) in any of its subpaths.
-func (p *Path) Contains(x, y float64) bool {
-	for _, pi := range p.Split() {
-		n, _ := pi.Windings(x, y)
-		if n%2 == 1 {
-			return true
-		}
-	}
-	return false
-}
-
-// Fills returns whether the point (x,y) is filled by the path. This depends on the FillRule. It uses a ray from (x,y) toward (∞,y) and counts the number of intersections with the path. When the point is on the boundary it is considered to be exterior.
-func (p *Path) Fills(x, y float64, fillRule FillRule) bool {
+// Contains returns whether the point (x,y) is contained/filled by the path. This depends on the
+// FillRule. It uses a ray from (x,y) toward (∞,y) and counts the number of intersections with
+// the path. When the point is on the boundary it is considered to be on the path's exterior.
+func (p *Path) Contains(x, y float64, fillRule FillRule) bool {
 	n, _ := p.Windings(x, y)
-	return fillRule == NonZero && n != 0 || n%2 != 0
+	return fillRule.Fills(n)
 }
 
-// InteriorPoint returns a point on the interior of the path. The path should be a non-complex non-self-intersecting path (i.e. settled with no subpaths). It uses the first subpath if there are multiple and returns the start position on open paths.
-func (p *Path) InteriorPoint() Point {
-	p = p.Split()[0]
-	if !p.Closed() {
-		return p.StartPos()
+// CCW returns true when the path is counter clockwise oriented at its bottom-right-most
+// coordinate. It is most useful when knowing that the path does not self-intersect as it will
+// tell you if the entire path is CCW or not. It will only return the result for the first subpath.
+// It will return true for an empty path or a straight line.
+func (p *Path) CCW() bool {
+	if len(p.d) <= 4 || (p.d[4] == LineToCmd || p.d[4] == CloseCmd) && len(p.d) <= 4+cmdLen(p.d[4]) {
+		// empty path or single straight segment
+		return true
 	}
 
-	// get a point on the left of the path and trace a ray to the right
-	// select the middle between an intersection into p and out of p
-	bounds := p.Bounds()
-	pos := Point{bounds.X, bounds.Y + bounds.H/2.0}
-	zs := p.RayIntersections(pos.X, pos.Y)
+	p = p.XMonotone()
 
-	i := 0
-	if Equal(zs[i].T, 0.0) || Equal(zs[i].T, 1.0) {
-		if zs[i].Parallel || zs[i+1].Parallel {
-			i += 3
-			for i+1 < len(zs) && zs[i-1].Parallel && zs[i].Parallel {
-				i += 2
-			}
-		} else {
-			i++
+	// pick bottom-right-most coordinate of subpath, as we know its left-hand side is filling
+	k, kMax := 4, len(p.d)
+	if p.d[kMax-1] == CloseCmd {
+		kMax -= cmdLen(CloseCmd)
+	}
+	for i := 4; i < len(p.d); {
+		cmd := p.d[i]
+		if cmd == MoveToCmd {
+			// only handle first subpath
+			kMax = i
+			break
 		}
-		if len(zs) <= i+1 {
-			// all parallel
-			pos.X += bounds.W / 2.0
-			return pos
+		i += cmdLen(cmd)
+		if x, y := p.d[i-3], p.d[i-2]; p.d[k-3] < x || Equal(p.d[k-3], x) && y < p.d[k-2] {
+			k = i
 		}
 	}
-	return zs[i].Point.Interpolate(zs[i+1].Point, 0.5)
+
+	// TODO: keep going forward/backwards for k and kPrev until both are not equally oriented
+	// get coordinates of previous and next segments
+	var kPrev int
+	if k == 4 {
+		kPrev = kMax
+	} else {
+		kPrev = k - cmdLen(p.d[k-1])
+	}
+
+	var angleNext float64
+	anglePrev := angleNorm(p.direction(kPrev, 1.0).Angle() + math.Pi)
+	if k == kMax {
+		// use implicit close command
+		angleNext = Point{p.d[1], p.d[2]}.Sub(Point{p.d[k-3], p.d[k-2]}).Angle()
+	} else {
+		angleNext = p.direction(k, 0.0).Angle()
+	}
+	return (angleNext - anglePrev) < 0.0
 }
 
-// Filling returns whether each subpath gets filled or not. Whether a path is filled depends on the FillRule and whether it negates another path. If a subpath is not closed, it is implicitly assumed to be closed. Subpaths must not self-intersect, use Settle to remove self-intersections.
+// Filling returns whether each subpath gets filled or not. Whether a path is filled depends on
+// the FillRule and whether it negates another path. If a subpath is not closed, it is implicitly
+// assumed to be closed.
 func (p *Path) Filling(fillRule FillRule) []bool {
-	// TODO: can be simplified assuming XMonotone and getting the left-most coordinate
 	ps := p.Split()
-	index := newSubpathIndexerSubpaths(ps)
 	filling := make([]bool, len(ps))
 	for i, pi := range ps {
-		pos := pi.InteriorPoint()              // get point inside subpath
-		zs := p.RayIntersections(pos.X, pos.Y) // get all intersections outwards
-
-		// interior point may be inside another subpath
-		// remove intersections until we find the one that leaves the current subpath
-		coincides := false
-		for {
-			j := 1
-			isSelf := index.in(i, zs[0].Seg)
-			coincides = !isSelf
-			for j < len(zs) && Equal(zs[j].X, zs[0].X) {
-				if index.in(i, zs[j].Seg) {
-					isSelf = true
-				} else {
-					coincides = true
-				}
-				j++
-			}
-			if isSelf {
-				break
-			}
-			zs = zs[j:]
+		// get current subpath's winding
+		n := 0
+		if pi.CCW() {
+			n++
+		} else {
+			n--
 		}
 
-		// when another subpath happens to intersect at the same position with the ray,
-		// we assume that subpaths don't intersect (only touch) so that it either:
-		// is inside the current subpath, encapsulates it, or is on the outside towards the right
-		if coincides {
-			// find the touching subpaths
-			subpaths := []int{i}
-			for _, z := range zs {
-				if !Equal(z.X, zs[0].X) {
-					break
-				}
-				found := false
-				subpath := index.get(z.Seg)
-				for k := 0; k < len(subpaths); k++ {
-					if subpaths[k] == subpath {
-						found = true
-						break
-					}
-				}
-				if !found {
-					subpaths = append(subpaths, subpath)
-				}
+		// sum windings from other subpaths
+		pos := Point{pi.d[1], pi.d[2]}
+		for j, pj := range ps {
+			if i == j {
+				continue
 			}
-
-			// check if the path bends to the left (inside) or encapsulates or right (outside)
-			area, areaExact := PolylineFromPathCoords(pi).Area(), math.NaN()
-			for _, subpath := range subpaths[1:] {
-				zs2 := []PathIntersection{}
-				for _, z := range zs {
-					if index.get(z.Seg) == subpath {
-						zs2 = append(zs2, z)
-					}
-				}
-
-				// windings start outside (or on boundary, same result) of the subpath
-				// windings==0 it is outside, otherwise it is inside/encapsulates the current path
-				if n2, boundary := windings(zs2); !boundary && n2 != 0 {
-					// if subpath has smaller area it inside, remove its intersections
-					area2, area2Exact := PolylineFromPathCoords(ps[subpath]).Area(), math.NaN()
-					if area == area2 || area == 0 || area2 == 0 {
-						// calculate exact area when coordinate area is equal
-						area2Exact = PolylineFromPath(ps[subpath]).Area()
-						if math.IsNaN(areaExact) {
-							areaExact = PolylineFromPath(pi).Area()
-						}
-						area2 = area // when area/area2==0
-					}
-					if area2 < area || area2Exact < areaExact {
-						for j := 0; j < len(zs) && Equal(zs[j].X, zs[0].X); j++ {
-							if index.get(zs[j].Seg) == subpath {
-								zs = append(zs[:j], zs[j+1:]...)
-								j--
-							}
-						}
-					}
-				}
+			zs := pj.RayIntersections(pos.X, pos.Y)
+			if ni, boundaryi := windings(zs); !boundaryi {
+				n += ni
+			} else {
+				// on the boundary, check if around the interior or exterior of pos
 			}
 		}
-
-		n, boundary := windings(zs)
-		if boundary {
-			// happens only when the current subpath goes up and down at the InteriorPoint
-			// or for open subpaths, count as if we we're inside the two edges
-			n = 1
-		}
-		filling[i] = fillRule == NonZero && n != 0 || n%2 != 0
+		filling[i] = fillRule.Fills(n)
 	}
 	return filling
-}
-
-// CCW returns true when the path has (mostly) a counter clockwise direction. It implictly closes open paths and will return true for a empty or straight line.
-func (p *Path) CCW() bool {
-	// Shoelace formula
-	area := 0.0
-	for _, pi := range p.Split() {
-		coords := pi.simplifyToCoords()
-		if !pi.Closed() {
-			coords = append(coords, coords[0])
-		}
-		for i := 1; i < len(coords); i++ {
-			area += (coords[i].X - coords[i-1].X) * (coords[i-1].Y + coords[i].Y)
-		}
-	}
-	return area <= 0.0
 }
 
 // FastBounds returns the maximum bounding box rectangle of the path. It is quicker than Bounds.
@@ -907,7 +955,7 @@ func (p *Path) FastBounds() Rect {
 		i += cmdLen(cmd)
 		start = end
 	}
-	return Rect{xmin, ymin, xmax - xmin, ymax - ymin}
+	return Rect{xmin, ymin, xmax, ymax}
 }
 
 // Bounds returns the exact bounding box rectangle of the path.
@@ -936,7 +984,7 @@ func (p *Path) Bounds() Rect {
 			xmin = math.Min(xmin, end.X)
 			xmax = math.Max(xmax, end.X)
 			if tdenom := (start.X - 2*cp.X + end.X); !Equal(tdenom, 0.0) {
-				if t := (start.X - cp.X) / tdenom; 0.0 < t && t < 1.0 {
+				if t := (start.X - cp.X) / tdenom; IntervalExclusive(t, 0.0, 1.0) {
 					x := quadraticBezierPos(start, cp, end, t)
 					xmin = math.Min(xmin, x.X)
 					xmax = math.Max(xmax, x.X)
@@ -946,7 +994,7 @@ func (p *Path) Bounds() Rect {
 			ymin = math.Min(ymin, end.Y)
 			ymax = math.Max(ymax, end.Y)
 			if tdenom := (start.Y - 2*cp.Y + end.Y); !Equal(tdenom, 0.0) {
-				if t := (start.Y - cp.Y) / tdenom; 0.0 < t && t < 1.0 {
+				if t := (start.Y - cp.Y) / tdenom; IntervalExclusive(t, 0.0, 1.0) {
 					y := quadraticBezierPos(start, cp, end, t)
 					ymin = math.Min(ymin, y.Y)
 					ymax = math.Max(ymax, y.Y)
@@ -964,12 +1012,12 @@ func (p *Path) Bounds() Rect {
 
 			xmin = math.Min(xmin, end.X)
 			xmax = math.Max(xmax, end.X)
-			if !math.IsNaN(t1) && 0.0 < t1 && t1 < 1.0 {
+			if !math.IsNaN(t1) && IntervalExclusive(t1, 0.0, 1.0) {
 				x1 := cubicBezierPos(start, cp1, cp2, end, t1)
 				xmin = math.Min(xmin, x1.X)
 				xmax = math.Max(xmax, x1.X)
 			}
-			if !math.IsNaN(t2) && 0.0 < t2 && t2 < 1.0 {
+			if !math.IsNaN(t2) && IntervalExclusive(t2, 0.0, 1.0) {
 				x2 := cubicBezierPos(start, cp1, cp2, end, t2)
 				xmin = math.Min(xmin, x2.X)
 				xmax = math.Max(xmax, x2.X)
@@ -982,12 +1030,12 @@ func (p *Path) Bounds() Rect {
 
 			ymin = math.Min(ymin, end.Y)
 			ymax = math.Max(ymax, end.Y)
-			if !math.IsNaN(t1) && 0.0 < t1 && t1 < 1.0 {
+			if !math.IsNaN(t1) && IntervalExclusive(t1, 0.0, 1.0) {
 				y1 := cubicBezierPos(start, cp1, cp2, end, t1)
 				ymin = math.Min(ymin, y1.Y)
 				ymax = math.Max(ymax, y1.Y)
 			}
-			if !math.IsNaN(t2) && 0.0 < t2 && t2 < 1.0 {
+			if !math.IsNaN(t2) && IntervalExclusive(t2, 0.0, 1.0) {
 				y2 := cubicBezierPos(start, cp1, cp2, end, t2)
 				ymin = math.Min(ymin, y2.Y)
 				ymax = math.Max(ymax, y2.Y)
@@ -1032,7 +1080,7 @@ func (p *Path) Bounds() Rect {
 		i += cmdLen(cmd)
 		start = end
 	}
-	return Rect{xmin, ymin, xmax - xmin, ymax - ymin}
+	return Rect{xmin, ymin, xmax, ymax}
 }
 
 // Length returns the length of the path in millimeters. The length is approximated for cubic Béziers.
@@ -1069,9 +1117,8 @@ func (p *Path) Length() float64 {
 	return d
 }
 
-// Transform transforms the path by the given transformation matrix and returns a new path.
+// Transform transforms the path by the given transformation matrix and returns a new path. It modifies the path in-place.
 func (p *Path) Transform(m Matrix) *Path {
-	p = p.Copy()
 	_, _, _, xscale, yscale, _ := m.Decompose()
 	for i := 0; i < len(p.d); {
 		cmd := p.d[i]
@@ -1102,14 +1149,16 @@ func (p *Path) Transform(m Matrix) *Path {
 			ry := p.d[i+2]
 			phi := p.d[i+3]
 			large, sweep := toArcFlags(p.d[i+4])
-			end := m.Dot(Point{p.d[i+5], p.d[i+6]})
+			end := Point{p.d[i+5], p.d[i+6]}
 
 			// For ellipses written as the conic section equation in matrix form, we have:
-			// (x, y) E (x; y) = 0, with E = (1/rx^2, 0; 0, 1/ry^2)
-			// for our transformed ellipse we have (x', y') = T (x, y), with T the affine transformation matrix
-			// so that (T^-1 (x'; y'))^T E (T^-1 (x'; y') = 0  =>  (x', y') T^(-1,T) E T^(-1) (x'; y') = 0
-			// we define Q = T^(-1,T) E T^(-1) the new ellipse equation which is typically rotated from the x-axis.
-			// That's why we find the eigenvalues and eigenvectors (the new direction and length of the major and minor axes).
+			// [x, y] E [x; y] = 0, with E = [1/rx^2, 0; 0, 1/ry^2]
+			// For our transformed ellipse we have [x', y'] = T [x, y], with T the affine
+			// transformation matrix so that
+			// (T^-1 [x'; y'])^T E (T^-1 [x'; y'] = 0  =>  [x', y'] T^(-T) E T^(-1) [x'; y'] = 0
+			// We define Q = T^(-1,T) E T^(-1) the new ellipse equation which is typically rotated
+			// from the x-axis. That's why we find the eigenvalues and eigenvectors (the new
+			// direction and length of the major and minor axes).
 			T := m.Rotate(phi * 180.0 / math.Pi)
 			invT := T.Inv()
 			Q := Identity.Scale(1.0/rx/rx, 1.0/ry/ry)
@@ -1131,6 +1180,8 @@ func (p *Path) Transform(m Matrix) *Path {
 			if xscale*yscale < 0.0 { // flip x or y axis needs flipping of the sweep
 				sweep = !sweep
 			}
+			end = m.Dot(end)
+
 			p.d[i+1] = rx
 			p.d[i+2] = ry
 			p.d[i+3] = phi
@@ -1179,9 +1230,23 @@ func (p *Path) Flatten(tolerance float64) *Path {
 	return p.replace(nil, quad, cube, arc)
 }
 
-// ReplaceArcs replaces ArcTo commands by CubeTo commands.
+// ReplaceArcs replaces ArcTo commands by CubeTo commands and returns a new path.
 func (p *Path) ReplaceArcs() *Path {
 	return p.replace(nil, nil, nil, arcToCube)
+}
+
+// XMonotone replaces all Bézier and arc segments to be x-monotone and returns a new path, that is each path segment is either increasing or decreasing with X while moving across the segment. This is always true for line segments.
+func (p *Path) XMonotone() *Path {
+	quad := func(p0, p1, p2 Point) *Path {
+		return xmonotoneQuadraticBezier(p0, p1, p2)
+	}
+	cube := func(p0, p1, p2, p3 Point) *Path {
+		return xmonotoneCubicBezier(p0, p1, p2, p3)
+	}
+	arc := func(start Point, rx, ry, phi float64, large, sweep bool, end Point) *Path {
+		return xmonotoneEllipticArc(start, rx, ry, phi, large, sweep, end)
+	}
+	return p.replace(nil, quad, cube, arc)
 }
 
 // replace replaces path segments by their respective functions, each returning the path that will replace the segment or nil if no replacement is to be performed. The line function will take the start and end points. The bezier function will take the start point, control point 1 and 2, and the end point (i.e. a cubic Bézier, quadratic Béziers will be implicitly converted to cubic ones). The arc function will take a start point, the major and minor radii, the radial rotaton counter clockwise, the large and sweep booleans, and the end point. The replacing path will replace the path segment without any checks, you need to make sure the be moved so that its start point connects with the last end point of the base path before the replacement. If the end point of the replacing path is different that the end point of what is replaced, the path that follows will be displaced.
@@ -1191,8 +1256,7 @@ func (p *Path) replace(
 	cube func(Point, Point, Point, Point) *Path,
 	arc func(Point, float64, float64, float64, bool, bool, Point) *Path,
 ) *Path {
-	p = p.Copy()
-
+	copied := false
 	var start, end Point
 	for i := 0; i < len(p.d); {
 		var q *Path
@@ -1229,6 +1293,11 @@ func (p *Path) replace(
 		}
 
 		if q != nil {
+			if !copied {
+				p = p.Copy()
+				copied = true
+			}
+
 			r := &Path{append([]float64{MoveToCmd, end.X, end.Y, MoveToCmd}, p.d[i+cmdLen(cmd):]...)}
 
 			p.d = p.d[: i : i+cmdLen(cmd)] // make sure not to overwrite the rest of the path
@@ -1266,7 +1335,7 @@ func (p *Path) Markers(first, mid, last *Path, align bool) []*Path {
 			if align {
 				m = m.Rotate(dir.Angle() * 180.0 / math.Pi)
 			}
-			markers = append(markers, q.Transform(m))
+			markers = append(markers, q.Copy().Transform(m))
 		}
 	}
 	return markers
@@ -1274,6 +1343,9 @@ func (p *Path) Markers(first, mid, last *Path, align bool) []*Path {
 
 // Split splits the path into its independent subpaths. The path is split before each MoveTo command.
 func (p *Path) Split() []*Path {
+	if p == nil {
+		return nil
+	}
 	var i, j int
 	ps := []*Path{}
 	for j < len(p.d) {
@@ -1611,63 +1683,65 @@ func (p *Path) Dash(offset float64, d ...float64) *Path {
 
 // Reverse returns a new path that is the same path as p but in the reverse direction.
 func (p *Path) Reverse() *Path {
-	rp := &Path{}
 	if len(p.d) == 0 {
-		return rp
+		return p
 	}
 
 	end := Point{p.d[len(p.d)-3], p.d[len(p.d)-2]}
-	if !end.IsZero() {
-		rp.MoveTo(end.X, end.Y)
-	}
-	start := end
-	closed := false
+	q := &Path{d: make([]float64, 0, len(p.d))}
+	q.d = append(q.d, MoveToCmd, end.X, end.Y, MoveToCmd)
 
+	closed := false
+	first, start := end, end
 	for i := len(p.d); 0 < i; {
 		cmd := p.d[i-1]
 		i -= cmdLen(cmd)
 
 		end = Point{}
-		if i > 0 {
+		if 0 < i {
 			end = Point{p.d[i-3], p.d[i-2]}
 		}
 
 		switch cmd {
-		case CloseCmd:
-			if !start.Equals(end) {
-				rp.LineTo(end.X, end.Y)
-			}
-			closed = true
 		case MoveToCmd:
 			if closed {
-				rp.Close()
+				q.d = append(q.d, CloseCmd, first.X, first.Y, CloseCmd)
 				closed = false
 			}
-			if !end.IsZero() {
-				rp.MoveTo(end.X, end.Y)
+			if i != 0 {
+				q.d = append(q.d, MoveToCmd, end.X, end.Y, MoveToCmd)
+				first = end
 			}
+		case CloseCmd:
+			if !start.Equals(end) {
+				q.d = append(q.d, LineToCmd, end.X, end.Y, LineToCmd)
+			}
+			closed = true
 		case LineToCmd:
 			if closed && (i == 0 || p.d[i-1] == MoveToCmd) {
-				rp.Close()
+				q.d = append(q.d, CloseCmd, first.X, first.Y, CloseCmd)
 				closed = false
 			} else {
-				rp.LineTo(end.X, end.Y)
+				q.d = append(q.d, LineToCmd, end.X, end.Y, LineToCmd)
 			}
 		case QuadToCmd:
 			cx, cy := p.d[i+1], p.d[i+2]
-			rp.QuadTo(cx, cy, end.X, end.Y)
+			q.d = append(q.d, QuadToCmd, cx, cy, end.X, end.Y, QuadToCmd)
 		case CubeToCmd:
-			cx1, cy1 := p.d[i+3], p.d[i+4]
-			cx2, cy2 := p.d[i+1], p.d[i+2]
-			rp.CubeTo(cx1, cy1, cx2, cy2, end.X, end.Y)
+			cx1, cy1 := p.d[i+1], p.d[i+2]
+			cx2, cy2 := p.d[i+3], p.d[i+4]
+			q.d = append(q.d, CubeToCmd, cx2, cy2, cx1, cy1, end.X, end.Y, CubeToCmd)
 		case ArcToCmd:
 			rx, ry, phi := p.d[i+1], p.d[i+2], p.d[i+3]
 			large, sweep := toArcFlags(p.d[i+4])
-			rp.ArcTo(rx, ry, phi*180.0/math.Pi, large, !sweep, end.X, end.Y)
+			q.d = append(q.d, ArcToCmd, rx, ry, phi, fromArcFlags(large, !sweep), end.X, end.Y, ArcToCmd)
 		}
 		start = end
 	}
-	return rp
+	if closed {
+		q.d = append(q.d, CloseCmd, first.X, first.Y, CloseCmd)
+	}
+	return q
 }
 
 // Segment is a path command.
