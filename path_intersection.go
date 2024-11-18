@@ -914,6 +914,8 @@ func addIntersections(queue *SweepEvents, handled map[SweepPointPair]struct{}, z
 	// clean up intersections outside one of the segments, this may happen for nearly parallel
 	// lines for example
 	for i := 0; i < len(zs); i++ {
+		zs[i].Point = zs[i].Point.Gridsnap(2.0 * Epsilon) // prevent numerical issues
+
 		if z := zs[i]; !a.vertical && !Interval(z.X, a.X, a.other.X) || a.vertical && !Interval(z.Y, a.Y, a.other.Y) || !b.vertical && !Interval(z.X, b.X, b.other.X) || b.vertical && !Interval(z.Y, b.Y, b.other.Y) { //z.X < a.X || z.X < b.X || a.other.X < z.X || b.other.X < z.X {
 			fmt.Println("WARNING: removing intersection", zs[i], "between", a, b)
 			zs = append(zs[:i], zs[i+1:]...)
@@ -933,8 +935,11 @@ func addIntersections(queue *SweepEvents, handled map[SweepPointPair]struct{}, z
 	// handle a
 	aLefts := []*SweepPoint{a}
 	aPrevLeft, aLastRight := a, a.other
-	for _, z := range zs {
+	for i, z := range zs {
 		if z.T[0] == 0.0 || z.T[0] == 1.0 {
+			// ignore tangent intersections at the endpoints
+			continue
+		} else if aPrevLeft.Point.Equals(z.Point) || i == len(zs)-1 && z.Point.Equals(aLastRight.Point) {
 			// ignore tangent intersections at the endpoints
 			continue
 		}
@@ -946,11 +951,11 @@ func addIntersections(queue *SweepEvents, handled map[SweepPointPair]struct{}, z
 
 		// update references
 		aPrevLeft.other, aRight.other = &aRight, aPrevLeft
-		aPrevLeft = &aLeft
 
 		// add to queue
 		queue.Push(&aRight)
 		aLefts = append(aLefts, &aLeft)
+		aPrevLeft = &aLeft
 	}
 	aPrevLeft.other, aLastRight.other = aLastRight, aPrevLeft
 	for _, aLeft := range aLefts[1:] {
@@ -961,8 +966,11 @@ func addIntersections(queue *SweepEvents, handled map[SweepPointPair]struct{}, z
 	// handle b
 	bLefts := []*SweepPoint{b}
 	bPrevLeft, bLastRight := b, b.other
-	for _, z := range zs {
+	for i, z := range zs {
 		if z.T[1] == 0.0 || z.T[1] == 1.0 {
+			// ignore tangent intersections at the endpoints
+			continue
+		} else if bPrevLeft.Point.Equals(z.Point) || i == len(zs)-1 && z.Point.Equals(bLastRight.Point) {
 			// ignore tangent intersections at the endpoints
 			continue
 		}
@@ -974,11 +982,11 @@ func addIntersections(queue *SweepEvents, handled map[SweepPointPair]struct{}, z
 
 		// update references
 		bPrevLeft.other, bRight.other = &bRight, bPrevLeft
-		bPrevLeft = &bLeft
 
 		// add to queue
 		queue.Push(&bRight)
 		bLefts = append(bLefts, &bLeft)
+		bPrevLeft = &bLeft
 	}
 	bPrevLeft.other, bLastRight.other = bLastRight, bPrevLeft
 	for _, bLeft := range bLefts[1:] {
@@ -1127,8 +1135,9 @@ func bentleyOttmann(ps, qs Paths, op pathOp, fillRule FillRule) *Path {
 			ps = append(ps, split[1:]...)
 		}
 	}
-	for i, p := range ps {
-		ps[i] = p.Flatten(Tolerance)
+	for i := range ps {
+		ps[i] = ps[i].Flatten(Tolerance)
+		ps[i] = ps[i].Gridsnap(2.0 * Epsilon) // prevent numerical issues
 	}
 	if qs != nil {
 		for i, iMax := 0, len(qs); i < iMax; i++ {
@@ -1138,8 +1147,9 @@ func bentleyOttmann(ps, qs Paths, op pathOp, fillRule FillRule) *Path {
 				qs = append(qs, split[1:]...)
 			}
 		}
-		for i, q := range qs {
-			qs[i] = q.Flatten(Tolerance)
+		for i := range qs {
+			qs[i] = qs[i].Flatten(Tolerance)
+			qs[i] = qs[i].Gridsnap(2.0 * Epsilon) // prevent numerical issues
 		}
 	}
 
@@ -1254,6 +1264,10 @@ func bentleyOttmann(ps, qs Paths, op pathOp, fillRule FillRule) *Path {
 			n := event.other.node
 			if n == nil {
 				continue
+			} else if n.SweepPoint == nil {
+				// this may happen if the left-endpoint is to the right of the right-endpoint for some reason
+				// usually due to a bug in the segment intersection code
+				fmt.Println("WARNING: other endpoint already removed, probably buggy intersection code")
 			}
 			prev := n.Prev()
 			next := n.Next()

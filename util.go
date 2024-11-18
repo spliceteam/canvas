@@ -116,6 +116,11 @@ func angleBetweenExclusive(theta, lower, upper float64) bool {
 	return false
 }
 
+// snap "gridsnaps" the floating point to a grid of the given spacing
+func snap(val, spacing float64) float64 {
+	return math.Round(val/spacing) * spacing
+}
+
 ////////////////////////////////////////////////////////////////
 
 type numEps float64
@@ -341,6 +346,11 @@ func (p Point) Interpolate(q Point, t float64) Point {
 	return Point{(1-t)*p.X + t*q.X, (1-t)*p.Y + t*q.Y}
 }
 
+// Gridsnap snaps point to a grid with the given spacing.
+func (p Point) Gridsnap(spacing float64) Point {
+	return Point{snap(p.X, spacing), snap(p.Y, spacing)}
+}
+
 // String returns the string representation of a point, such as "(x,y)".
 func (p Point) String() string {
 	return fmt.Sprintf("(%g,%g)", p.X, p.Y)
@@ -365,6 +375,11 @@ func (r Rect) W() float64 {
 // H returns the height of the rectangle.
 func (r Rect) H() float64 {
 	return r.Y1 - r.Y0
+}
+
+// Center returns the center point.
+func (r Rect) Center() Point {
+	return Point{(r.X0 + r.X1) / 2.0, (r.Y0 + r.Y1) / 2.0}
 }
 
 // Equals returns true if rectangles are equal with tolerance Epsilon.
@@ -441,6 +456,68 @@ func (r Rect) ContainsPoint(p Point) bool {
 // TouchesPoint returns true if the rectangles contains or touches a point.
 func (r Rect) TouchesPoint(p Point) bool {
 	return (r.X0 < p.X || Equal(p.X, r.X0)) && (p.X < r.X1 || Equal(p.X, r.X1)) && (r.Y0 < p.Y || Equal(p.Y, r.Y0)) && (p.Y < r.Y1 || Equal(p.Y, r.Y1))
+}
+
+// ClosestPoint returns a point in the rectangle closest to the given point.
+func (r Rect) ClosestPoint(p Point) Point {
+	if r.X0 <= p.X && p.X <= r.X1 {
+		if r.Y0 <= p.Y && p.Y <= r.Y1 {
+			// inside
+			return p
+		} else if r.Y1 < p.Y {
+			return Point{p.X, r.Y1}
+		} else {
+			return Point{p.X, r.Y0}
+		}
+	} else if r.X1 < p.X {
+		if r.Y0 <= p.Y && p.Y <= r.Y1 {
+			return Point{r.X1, p.Y}
+		} else if r.Y1 < p.Y {
+			return Point{r.X1, r.Y1}
+		} else {
+			return Point{r.X1, r.Y0}
+		}
+	} else {
+		if r.Y0 <= p.Y && p.Y <= r.Y1 {
+			return Point{r.X0, p.Y}
+		} else if r.Y1 < p.Y {
+			return Point{r.X0, r.Y1}
+		} else {
+			return Point{r.X0, r.Y0}
+		}
+	}
+}
+
+// DistanceToPoint returns the distance between the rectangle and a point.
+func (r Rect) DistanceToPoint(p Point) float64 {
+	var q Point
+	if r.X0 <= p.X && p.X <= r.X1 {
+		if r.Y0 <= p.Y && p.Y <= r.Y1 {
+			// inside
+			return 0.0
+		} else if r.Y1 < p.Y {
+			return p.Y - r.Y1
+		} else {
+			return r.Y0 - p.Y
+		}
+	} else if r.X1 < p.X {
+		if r.Y0 <= p.Y && p.Y <= r.Y1 {
+			return p.X - r.X1
+		} else if r.Y1 < p.Y {
+			q = Point{r.X1, r.Y1}
+		} else {
+			q = Point{r.X1, r.Y0}
+		}
+	} else {
+		if r.Y0 <= p.Y && p.Y <= r.Y1 {
+			return r.X0 - p.X
+		} else if r.Y1 < p.Y {
+			q = Point{r.X0, r.Y1}
+		} else {
+			q = Point{r.X0, r.Y0}
+		}
+	}
+	return p.Sub(q).Length()
 }
 
 // Contains returns true if r contains q.
