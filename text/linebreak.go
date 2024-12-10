@@ -293,12 +293,6 @@ func (lb *linebreaker) computeAdjustmentRatio(b int, active *Breakpoint) float64
 	}
 	ratio := 0.0
 	if L < lb.width {
-		if lb.Y-active.Y == 0.0 {
-			// unstretchable line, act as if we have a very small stretchable space.
-			// this helps to distinguish between between smaller and longer lines if both would
-			// need to stretched beyond the tolerance
-			return Infinity * (1.0 + (lb.width-L)/lb.width)
-		}
 		ratio = (lb.width - L) / (lb.Y - active.Y)
 	} else if lb.width < L {
 		ratio = (lb.width - L) / (lb.Z - active.Z)
@@ -665,13 +659,7 @@ func GlyphsToItems(glyphs []Glyph, indent float64, align Align) []Item {
 		} else if IsNewline(glyph.Text) {
 			// only add one penalty for \r\n
 			if glyph.Text != '\n' || i == 0 || glyphs[i-1].Text != '\r' {
-				if align == Centered {
-					items = append(items, Glue(0.0, stretchWidth, 0.0))
-					items = append(items, Penalty(0.0, -Infinity, false))
-				} else {
-					items = append(items, Glue(0.0, math.Inf(1.0), 0.0))
-					items = append(items, Penalty(0.0, -Infinity, true))
-				}
+				items = append(items, Penalty(0.0, -Infinity, false))
 			}
 			items[len(items)-1].Size++
 		} else if glyph.Text == '\u00AD' || glyph.Text == '\u200B' {
