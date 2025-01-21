@@ -693,11 +693,14 @@ func (face *FontFace) LineHeight() float64 {
 	return metrics.Ascent + metrics.Descent
 }
 
+func (face *FontFace) Glyphs(s string) []text.Glyph {
+	ppem := face.PPEM(DefaultResolution)
+	return face.Font.shaper.Shape(s, ppem, face.Direction, face.Script, face.Language, face.Font.features, face.Font.variations)
+}
+
 // TextWidth returns the width of a given string in millimeters.
 func (face *FontFace) TextWidth(s string) float64 {
-	ppem := face.PPEM(DefaultResolution)
-	glyphs := face.Font.shaper.Shape(s, ppem, face.Direction, face.Script, face.Language, face.Font.features, face.Font.variations)
-	return face.textWidth(glyphs)
+	return face.textWidth(face.Glyphs(s))
 }
 
 func (face *FontFace) textWidth(glyphs []text.Glyph) float64 {
@@ -740,8 +743,7 @@ func (face *FontFace) Decorate(width float64) *Path {
 // ToPath converts a string to its glyph paths.
 func (face *FontFace) ToPath(s string) (*Path, float64, error) {
 	ppem := face.PPEM(DefaultResolution)
-	glyphs := face.Font.shaper.Shape(s, ppem, face.Direction, face.Script, face.Language, face.Font.features, face.Font.variations)
-	return face.toPath(glyphs, ppem)
+	return face.toPath(face.Glyphs(s), ppem)
 }
 
 func (face *FontFace) toPath(glyphs []text.Glyph, ppem uint16) (*Path, float64, error) {
@@ -758,7 +760,12 @@ func (face *FontFace) toPath(glyphs []text.Glyph, ppem uint16) (*Path, float64, 
 	}
 
 	if face.FauxBold != 0.0 {
-		p = p.Offset(face.FauxBold*face.Size, NonZero, Tolerance)
+		d := face.FauxBold * face.Size
+		if face.Font.IsTrueType {
+			// TrueType is CW oriented for filling contours.
+			d = -d
+		}
+		p = p.Offset(d, Tolerance)
 	}
 	if face.FauxItalic != 0.0 {
 		p = p.Transform(Identity.Shear(face.FauxItalic, 0.0))

@@ -26,6 +26,8 @@ type Rasterizer struct {
 	draw.Image
 	resolution canvas.Resolution
 	colorSpace canvas.ColorSpace
+
+	ras *vector.Rasterizer // reuse
 }
 
 // New returns a renderer that draws to a rasterized image. The final width and height of the image is the width and height (mm) multiplied by the resolution (px/mm), thus a higher resolution results in larger images. By default the linear color space is used, which assumes input and output colors are in linearRGB. If the sRGB color space is used for drawing with an average of gamma=2.2, the input and output colors are assumed to be in sRGB (a common assumption) and blending happens in linearRGB. Be aware that for text this results in thin stems for black-on-white (but wide stems for white-on-black).
@@ -50,6 +52,8 @@ func FromImage(img draw.Image, resolution canvas.Resolution, colorSpace canvas.C
 		Image:      img,
 		resolution: resolution,
 		colorSpace: colorSpace,
+
+		ras: &vector.Rasterizer{},
 	}
 }
 
@@ -79,7 +83,8 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 		tolerance := canvas.PixelTolerance / r.resolution.DPMM()
 		stroke = path
 		if 0 < len(style.Dashes) {
-			stroke = stroke.Dash(style.DashOffset, style.Dashes...)
+			dashOffset, dashes := canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
+			stroke = stroke.Dash(dashOffset, dashes...)
 		}
 		stroke = stroke.Stroke(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, tolerance)
 		stroke = stroke.Transform(m)
@@ -130,10 +135,6 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			}
 		}
 
-		// TODO: reuse rasterizer and call Reset? It would require it to be the size of image
-		ras := vector.NewRasterizer(w, h)
-		fill = fill.Translate(-float64(x)/dpmm, -float64(size.Y-y-h)/dpmm)
-		fill.ToRasterizer(ras, r.resolution)
 		var src image.Image
 		if style.Fill.IsColor() {
 			c := r.colorSpace.ToLinear(style.Fill.Color)
@@ -147,7 +148,10 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			pattern.ClipTo(r, fill)
 		}
 		if src != nil {
-			ras.Draw(r.Image, image.Rect(x, y, x+w, y+h), src, image.Point{dx, dy})
+			r.ras.Reset(w, h)
+			fill = fill.Translate(-float64(x)/dpmm, -float64(size.Y-y-h)/dpmm)
+			fill.ToRasterizer(r.ras, r.resolution)
+			r.ras.Draw(r.Image, image.Rect(x, y, x+w, y+h), src, image.Point{dx, dy})
 		}
 	}
 	if style.HasStroke() {
@@ -158,9 +162,6 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			}
 		}
 
-		ras := vector.NewRasterizer(w, h)
-		stroke = stroke.Translate(-float64(x)/dpmm, -float64(size.Y-y-h)/dpmm)
-		stroke.ToRasterizer(ras, r.resolution)
 		var src image.Image
 		if style.Stroke.IsColor() {
 			c := r.colorSpace.ToLinear(style.Stroke.Color)
@@ -174,7 +175,10 @@ func (r *Rasterizer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.
 			pattern.ClipTo(r, stroke)
 		}
 		if src != nil {
-			ras.Draw(r.Image, image.Rect(x, y, x+w, y+h), src, image.Point{dx, dy})
+			r.ras.Reset(w, h)
+			stroke = stroke.Translate(-float64(x)/dpmm, -float64(size.Y-y-h)/dpmm)
+			stroke.ToRasterizer(r.ras, r.resolution)
+			r.ras.Draw(r.Image, image.Rect(x, y, x+w, y+h), src, image.Point{dx, dy})
 		}
 	}
 }
@@ -188,24 +192,29 @@ func (r *Rasterizer) RenderText(text *canvas.Text, m canvas.Matrix) {
 func (r *Rasterizer) RenderImage(img image.Image, m canvas.Matrix) {
 	// add transparent margin to image for smooth borders when rotating
 	// TODO: optimize when transformation is only translation or stretch (if optimizing, dont overwrite original img when gamma correcting)
-	margin := 0 // TODO: margin makes stretched image blurry, how can we make edges smoother after rotation without affecting stretching?
-	size := img.Bounds().Size()
-	sp := img.Bounds().Min // starting point
-	img2 := image.NewRGBA(image.Rect(0, 0, size.X+margin*2, size.Y+margin*2))
-	draw.Draw(img2, image.Rect(margin, margin, size.X+margin, size.Y+margin), img, sp, draw.Over)
+	margin := 0
+	if (m[0][1] != 0.0 || m[1][0] != 0.0) && (m[0][0] != 0.0 || m[1][1] == 0.0) {
+		// only add margin for shear transformation or rotations that are not 90/180/270 degrees
+		margin = 4
+		size := img.Bounds().Size()
+		sp := img.Bounds().Min // starting point
+		img2 := image.NewRGBA(image.Rect(0, 0, size.X+margin*2, size.Y+margin*2))
+		draw.Draw(img2, image.Rect(margin, margin, size.X+margin, size.Y+margin), img, sp, draw.Over)
+		img = img2
+	}
+
+	if _, ok := r.colorSpace.(canvas.LinearColorSpace); !ok {
+		// gamma decompress
+		changeColorSpace(img.(draw.Image), img, r.colorSpace.ToLinear)
+	}
 
 	// draw to destination image
 	// note that we need to correct for the added margin in origin and m
 	dpmm := r.resolution.DPMM()
-	origin := m.Dot(canvas.Point{-float64(margin), float64(img2.Bounds().Size().Y - margin)}).Mul(dpmm)
+	origin := m.Dot(canvas.Point{-float64(margin), float64(img.Bounds().Size().Y - margin)}).Mul(dpmm)
 	m = m.Scale(dpmm, dpmm)
-
-	if _, ok := r.colorSpace.(canvas.LinearColorSpace); !ok {
-		// gamma decompress
-		changeColorSpace(img2, img2, r.colorSpace.ToLinear)
-	}
 
 	h := float64(r.Bounds().Size().Y)
 	aff3 := f64.Aff3{m[0][0], -m[0][1], origin.X, -m[1][0], m[1][1], h - origin.Y}
-	draw.CatmullRom.Transform(r, aff3, img2, img2.Bounds(), draw.Over, nil)
+	draw.CatmullRom.Transform(r, aff3, img, img.Bounds(), draw.Over, nil)
 }

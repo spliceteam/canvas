@@ -145,22 +145,165 @@ func (zs Intersections) HasTangent() bool {
 }
 
 func (zs Intersections) add(pos Point, ta, tb, dira, dirb float64, tangent, same bool) Intersections {
-	ta = math.Max(0.0, math.Min(1.0, ta))
-	tb = math.Max(0.0, math.Min(1.0, tb))
-	if Equal(ta, 0.0) {
+	// normalise T values between [0,1]
+	if ta < 0.0 { // || Equal(ta, 0.0) {
 		ta = 0.0
-	} else if Equal(ta, 1.0) {
+	} else if 1.0 <= ta { // || Equal(ta, 1.0) {
 		ta = 1.0
 	}
-	if Equal(tb, 0.0) {
+	if tb < 0.0 { // || Equal(tb, 0.0) {
 		tb = 0.0
-	} else if Equal(tb, 1.0) {
+	} else if 1.0 < tb { // || Equal(tb, 1.0) {
 		tb = 1.0
 	}
 	return append(zs, Intersection{pos, [2]float64{ta, tb}, [2]float64{dira, dirb}, tangent, same})
 }
 
-// https://www.geometrictools.com/GTE/Mathematics/IntrLine2Line2.h
+func correctIntersection(z, aMin, aMax, bMin, bMax Point) Point {
+	if z.X < aMin.X {
+		//fmt.Println("CORRECT 1:", a0, a1, "--", b0, b1)
+		z.X = aMin.X
+	} else if aMax.X < z.X {
+		//fmt.Println("CORRECT 2:", a0, a1, "--", b0, b1)
+		z.X = aMax.X
+	}
+	if z.X < bMin.X {
+		//fmt.Println("CORRECT 3:", a0, a1, "--", b0, b1)
+		z.X = bMin.X
+	} else if bMax.X < z.X {
+		//fmt.Println("CORRECT 4:", a0, a1, "--", b0, b1)
+		z.X = bMax.X
+	}
+	if z.Y < aMin.Y {
+		//fmt.Println("CORRECT 5:", a0, a1, "--", b0, b1)
+		z.Y = aMin.Y
+	} else if aMax.Y < z.Y {
+		//fmt.Println("CORRECT 6:", a0, a1, "--", b0, b1)
+		z.Y = aMax.Y
+	}
+	if z.Y < bMin.Y {
+		//fmt.Println("CORRECT 7:", a0, a1, "--", b0, b1)
+		z.Y = bMin.Y
+	} else if bMax.Y < z.Y {
+		//fmt.Println("CORRECT 8:", a0, a1, "--", b0, b1)
+		z.Y = bMax.Y
+	}
+	return z
+}
+
+// F. Antonio, "Faster Line Segment Intersection", Graphics Gems III, 1992
+func intersectionLineLineBentleyOttmann(zs []Point, a0, a1, b0, b1 Point) []Point {
+	// fast line-line intersection code, with additional constraints for the BentleyOttmann code:
+	// - a0 is to the left and/or bottom of a1, same for b0 and b1
+	// - an intersection z must keep the above property between (a0,z), (z,a1), (b0,z), and (z,b1)
+	// note that an exception is made for (z,a1) and (z,b1) to allow them to become vertical, this
+	// is because there isn't always "space" between a0.X and a1.X, eg. when a1.X = nextafter(a0.X)
+	if a1.X < b0.X || b1.X < a0.X {
+		return zs
+	}
+
+	aMin, aMax, bMin, bMax := a0, a1, b0, b1
+	if a1.Y < a0.Y {
+		aMin.Y, aMax.Y = aMax.Y, aMin.Y
+	}
+	if b1.Y < b0.Y {
+		bMin.Y, bMax.Y = bMax.Y, bMin.Y
+	}
+	if aMax.Y < bMin.Y || bMax.Y < aMin.Y {
+		return zs
+	} else if (aMax.X == bMin.X || bMax.X == aMin.X) && (aMax.Y == bMin.Y || bMax.Y == aMin.Y) {
+		return zs
+	}
+
+	// only the position and T values are valid for each intersection
+	A := a1.Sub(a0)
+	B := b0.Sub(b1)
+	C := a0.Sub(b0)
+	denom := B.PerpDot(A)
+	// divide by length^2 since the perpdot between very small segments may be below Epsilon
+	if denom == 0.0 {
+		// colinear
+		if C.PerpDot(B) == 0.0 {
+			// overlap, rotate to x-axis
+			a, b, c, d := a0.X, a1.X, b0.X, b1.X
+			if math.Abs(A.X) < math.Abs(A.Y) {
+				// mostly vertical
+				a, b, c, d = a0.Y, a1.Y, b0.Y, b1.Y
+			}
+			if c < b && a < d {
+				if a < c {
+					zs = append(zs, b0)
+				} else if c < a {
+					zs = append(zs, a0)
+				}
+				if d < b {
+					zs = append(zs, b1)
+				} else if b < d {
+					zs = append(zs, a1)
+				}
+			}
+		}
+		return zs
+	}
+
+	// find intersections within +-Epsilon to avoid missing near intersections
+	ta := C.PerpDot(B) / denom
+	if ta < -Epsilon || 1.0+Epsilon < ta {
+		return zs
+	}
+
+	tb := A.PerpDot(C) / denom
+	if tb < -Epsilon || 1.0+Epsilon < tb {
+		return zs
+	}
+
+	// ta is snapped to 0.0 or 1.0 if very close
+	if ta <= Epsilon {
+		ta = 0.0
+	} else if 1.0-Epsilon <= ta {
+		ta = 1.0
+	}
+
+	z := a0.Interpolate(a1, ta)
+	z = correctIntersection(z, aMin, aMax, bMin, bMax)
+	if z != a0 && z != a1 || z != b0 && z != b1 {
+		// not at endpoints for both
+		if a0 != b0 && z != a0 && z != b0 && b0.Sub(z).PerpDot(z.Sub(a0)) == 0.0 {
+			a, c, m := a0.X, b0.X, z.X
+			if math.Abs(z.Sub(a0).X) < math.Abs(z.Sub(a0).Y) {
+				// mostly vertical
+				a, c, m = a0.Y, b0.Y, z.Y
+			}
+
+			if a != c && (a < m) == (c < m) {
+				if a < m && a < c || m < a && c < a {
+					zs = append(zs, b0)
+				} else {
+					zs = append(zs, a0)
+				}
+			}
+			zs = append(zs, z)
+		} else if a1 != b1 && z != a1 && z != b1 && z.Sub(b1).PerpDot(a1.Sub(z)) == 0.0 {
+			b, d, m := a1.X, b1.X, z.X
+			if math.Abs(z.Sub(a1).X) < math.Abs(z.Sub(a1).Y) {
+				// mostly vertical
+				b, d, m = a1.Y, b1.Y, z.Y
+			}
+
+			if b != d && (b < m) == (d < m) {
+				if b < m && b < d || m < b && d < b {
+					zs = append(zs, b1)
+				} else {
+					zs = append(zs, a1)
+				}
+			}
+		} else {
+			zs = append(zs, z)
+		}
+	}
+	return zs
+}
+
 func intersectionLineLine(zs Intersections, a0, a1, b0, b1 Point) Intersections {
 	if a0.Equals(a1) || b0.Equals(b1) {
 		return zs // zero-length Close

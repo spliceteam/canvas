@@ -21,7 +21,12 @@ var Precision = 8
 
 // Equal returns true if a and b are equal within an absolute tolerance of Epsilon or within a relative tolerance of Epsilon (relative to the largest of the two).
 func Equal(a, b float64) bool {
-	return math.Abs(a-b) <= Epsilon // this is much quicker
+	// avoid math.Abs
+	if a < b {
+		return b-a <= Epsilon
+	}
+	return a-b <= Epsilon
+	//return math.Abs(a-b) <= Epsilon // this is much quicker
 
 	// See https://floating-point-gui.de/errors/comparison/ and
 	// https://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/
@@ -346,6 +351,14 @@ func (p Point) Interpolate(q Point, t float64) Point {
 	return Point{(1-t)*p.X + t*q.X, (1-t)*p.Y + t*q.Y}
 }
 
+func (p Point) InterpolateX(q Point, x float64) Point {
+	return p.Interpolate(q, (x-p.X)/(q.X-p.X))
+}
+
+func (p Point) InterpolateY(q Point, y float64) Point {
+	return p.Interpolate(q, (y-p.Y)/(q.Y-p.Y))
+}
+
 // Gridsnap snaps point to a grid with the given spacing.
 func (p Point) Gridsnap(spacing float64) Point {
 	return Point{snap(p.X, spacing), snap(p.Y, spacing)}
@@ -353,7 +366,7 @@ func (p Point) Gridsnap(spacing float64) Point {
 
 // String returns the string representation of a point, such as "(x,y)".
 func (p Point) String() string {
-	return fmt.Sprintf("(%g,%g)", p.X, p.Y)
+	return fmt.Sprintf("(%v,%v)", p.X, p.Y)
 }
 
 ////////////////////////////////////////////////////////////////
@@ -361,6 +374,21 @@ func (p Point) String() string {
 // Rect is a rectangle in 2D defined by a position and its width and height.
 type Rect struct {
 	X0, Y0, X1, Y1 float64
+}
+
+func RectFromPoints(ps ...Point) Rect {
+	if len(ps) == 0 {
+		return Rect{}
+	}
+	r := Rect{ps[0].X, ps[0].Y, ps[0].X, ps[0].Y}
+	for _, p := range ps[1:] {
+		r = r.AddPoint(p)
+	}
+	return r
+}
+
+func (r Rect) Zero() bool {
+	return r == Rect{}
 }
 
 func (r Rect) Empty() bool {
@@ -375,6 +403,11 @@ func (r Rect) W() float64 {
 // H returns the height of the rectangle.
 func (r Rect) H() float64 {
 	return r.Y1 - r.Y0
+}
+
+// Area returns the area of the rectangle.
+func (r Rect) Area() float64 {
+	return (r.X1 - r.X0) * (r.Y1 - r.Y0)
 }
 
 // Center returns the center point.
@@ -396,13 +429,21 @@ func (r Rect) Translate(x, y float64) Rect {
 	return r
 }
 
+// Transform transforms the rectangle by affine transformation matrix m and returns the new bounds of that rectangle.
+func (r Rect) Transform(m Matrix) Rect {
+	p0 := m.Dot(Point{r.X0, r.Y0})
+	p1 := m.Dot(Point{r.X1, r.Y0})
+	p2 := m.Dot(Point{r.X1, r.Y1})
+	p3 := m.Dot(Point{r.X0, r.Y1})
+	x0 := math.Min(p0.X, math.Min(p1.X, math.Min(p2.X, p3.X)))
+	y0 := math.Min(p0.Y, math.Min(p1.Y, math.Min(p2.Y, p3.Y)))
+	x1 := math.Max(p0.X, math.Max(p1.X, math.Max(p2.X, p3.X)))
+	y1 := math.Max(p0.Y, math.Max(p1.Y, math.Max(p2.Y, p3.Y)))
+	return Rect{x0, y0, x1, y1}
+}
+
 // Add returns a rect that encompasses both the current rect and the given rect.
 func (r Rect) Add(q Rect) Rect {
-	if r.Empty() {
-		return q
-	} else if q.Empty() {
-		return r
-	}
 	x0 := math.Min(r.X0, q.X0)
 	y0 := math.Min(r.Y0, q.Y0)
 	x1 := math.Max(r.X1, q.X1)
@@ -428,34 +469,14 @@ func (r Rect) Expand(d float64) Rect {
 	return r
 }
 
-// Transform transforms the rectangle by affine transformation matrix m and returns the new bounds of that rectangle.
-func (r Rect) Transform(m Matrix) Rect {
-	p0 := m.Dot(Point{r.X0, r.Y0})
-	p1 := m.Dot(Point{r.X1, r.Y0})
-	p2 := m.Dot(Point{r.X1, r.Y1})
-	p3 := m.Dot(Point{r.X0, r.Y1})
-	x0 := math.Min(p0.X, math.Min(p1.X, math.Min(p2.X, p3.X)))
-	y0 := math.Min(p0.Y, math.Min(p1.Y, math.Min(p2.Y, p3.Y)))
-	x1 := math.Max(p0.X, math.Max(p1.X, math.Max(p2.X, p3.X)))
-	y1 := math.Max(p0.Y, math.Max(p1.Y, math.Max(p2.Y, p3.Y)))
-	return Rect{x0, y0, x1, y1}
-}
-
-// ContainsPoint returns true if the rectangles contains a point, not if it touches an edge.
+// ContainsPoint returns true if the rectangle contains or touches an edge.
 func (r Rect) ContainsPoint(p Point) bool {
-	if p.X < r.X0 || Equal(p.X, r.X0) || r.X1 < p.X || Equal(p.X, r.X1) {
-		// left or right
-		return false
-	} else if p.Y < r.Y0 || Equal(p.Y, r.Y0) || r.Y1 < p.Y || Equal(p.Y, r.Y1) {
-		// below or above
-		return false
-	}
-	return true
+	return cohenSutherlandOutcode(r, p, 0.0) == 0
 }
 
-// TouchesPoint returns true if the rectangles contains or touches a point.
+// TouchesPoint returns true if the rectangle touches a point (within +-Epsilon).
 func (r Rect) TouchesPoint(p Point) bool {
-	return (r.X0 < p.X || Equal(p.X, r.X0)) && (p.X < r.X1 || Equal(p.X, r.X1)) && (r.Y0 < p.Y || Equal(p.Y, r.Y0)) && (p.Y < r.Y1 || Equal(p.Y, r.Y1))
+	return Interval(p.X, r.X0, r.X1) && Interval(p.Y, r.Y0, r.Y1)
 }
 
 // ClosestPoint returns a point in the rectangle closest to the given point.
@@ -520,24 +541,31 @@ func (r Rect) DistanceToPoint(p Point) float64 {
 	return p.Sub(q).Length()
 }
 
+func (r Rect) ContainsLine(a, b Point) bool {
+	return r.ContainsPoint(a) && r.ContainsPoint(b)
+}
+
+func (r Rect) OverlapsLine(a, b Point) bool {
+	_, _, overlaps, _ := cohenSutherlandLineClip(r, a, b, 0.0)
+	return overlaps
+}
+
+func (r Rect) TouchesLine(a, b Point) bool {
+	_, _, _, touches := cohenSutherlandLineClip(r, a, b, Epsilon)
+	return touches
+}
+
 // Contains returns true if r contains q.
 func (r Rect) Contains(q Rect) bool {
-	if q.X0 < r.X0 && !Equal(r.X0, q.X0) || r.X1 < q.X1 && !Equal(r.X1, q.X1) {
-		// left or right
-		return false
-	} else if q.Y0 < r.Y0 && !Equal(r.Y0, q.Y0) || r.Y1 < q.Y1 && !Equal(r.Y1, q.Y1) {
-		// below or above
-		return false
-	}
-	return true
+	return r.X0 <= q.X0 && q.X1 <= r.X1 && r.Y0 <= q.Y0 && q.Y1 <= r.Y1
 }
 
 // Overlaps returns true if both rectangles overlap.
 func (r Rect) Overlaps(q Rect) bool {
-	if q.X1 < r.X0 || Equal(q.X1, r.X0) || r.X1 < q.X0 || Equal(r.X1, q.X0) {
+	if q.X1 <= r.X0 || r.X1 <= q.X0 {
 		// left or right
 		return false
-	} else if q.Y1 < r.Y0 || Equal(q.Y1, r.Y0) || r.Y1 < q.Y0 || Equal(r.Y1, q.Y0) {
+	} else if q.Y1 <= r.Y0 || r.Y1 <= q.Y0 {
 		// below or above
 		return false
 	}
@@ -546,10 +574,10 @@ func (r Rect) Overlaps(q Rect) bool {
 
 // Touches returns true if both rectangles touch (or overlap).
 func (r Rect) Touches(q Rect) bool {
-	if q.X1 < r.X0 && !Equal(r.X0, q.X1) || r.X1 < q.X0 && !Equal(r.X1, q.X0) {
+	if q.X1+Epsilon < r.X0 || r.X1 < q.X0-Epsilon {
 		// left or right
 		return false
-	} else if q.Y1 < r.Y0 && !Equal(r.Y0, q.Y1) || r.Y1 < q.Y0 && !Equal(r.Y1, q.Y0) {
+	} else if q.Y1+Epsilon < r.Y0 || r.Y1 < q.Y0-Epsilon {
 		// below or above
 		return false
 	}
@@ -567,11 +595,6 @@ func (r Rect) And(q Rect) Rect {
 	}
 	return Rect{x0, y0, x1, y1}
 
-}
-
-// Area returns the area of the rectangle.
-func (r Rect) Area() float64 {
-	return (r.X1 - r.X0) * (r.Y1 - r.Y0)
 }
 
 // ToPath converts the rectangle to a path.
@@ -825,6 +848,74 @@ func (m Matrix) ToSVG(h float64) string {
 }
 
 ////////////////////////////////////////////////////////////////
+
+func cohenSutherlandOutcode(rect Rect, p Point, eps float64) int {
+	code := 0b0000
+	if p.X < rect.X0-eps {
+		code |= 0b0001 // left
+	} else if rect.X1+eps < p.X {
+		code |= 0b0010 // right
+	}
+	if p.Y < rect.Y0-eps {
+		code |= 0b0100 // bottom
+	} else if rect.Y1+eps < p.Y {
+		code |= 0b1000 // top
+	}
+	return code
+}
+
+// return whether line is inside the rectangle, either entirely or partially.
+func cohenSutherlandLineClip(rect Rect, a, b Point, eps float64) (Point, Point, bool, bool) {
+	outcode0 := cohenSutherlandOutcode(rect, a, eps)
+	outcode1 := cohenSutherlandOutcode(rect, b, eps)
+	if outcode0 == 0 && outcode1 == 0 {
+		return a, b, true, false
+	}
+	for {
+		if (outcode0 | outcode1) == 0 {
+			// both inside
+			return a, b, true, true
+		} else if (outcode0 & outcode1) != 0 {
+			// both in same region outside
+			return a, b, false, false
+		}
+
+		// pick point outside
+		outcodeOut := outcode0
+		if outcode0 < outcode1 {
+			outcodeOut = outcode1
+		}
+
+		// intersect with rectangle
+		var c Point
+		if (outcodeOut & 0b1000) != 0 {
+			// above
+			c.X = a.X + (b.X-a.X)*(rect.Y1-a.Y)/(b.Y-a.Y)
+			c.Y = rect.Y1
+		} else if (outcodeOut & 0b0100) != 0 {
+			// below
+			c.X = a.X + (b.X-a.X)*(rect.Y0-a.Y)/(b.Y-a.Y)
+			c.Y = rect.Y0
+		} else if (outcodeOut & 0b0010) != 0 {
+			// right
+			c.X = rect.X1
+			c.Y = a.Y + (b.Y-a.Y)*(rect.X1-a.X)/(b.X-a.X)
+		} else if (outcodeOut & 0b0001) != 0 {
+			// left
+			c.X = rect.X0
+			c.Y = a.Y + (b.Y-a.Y)*(rect.X0-a.X)/(b.X-a.X)
+		}
+
+		// prepare next pass
+		if outcodeOut == outcode0 {
+			outcode0 = cohenSutherlandOutcode(rect, c, eps)
+			a = c
+		} else {
+			outcode1 = cohenSutherlandOutcode(rect, c, eps)
+			b = c
+		}
+	}
+}
 
 // Numerically stable quadratic formula, lowest root is returned first, see https://math.stackexchange.com/a/2007723
 func solveQuadraticFormula(a, b, c float64) (float64, float64) {

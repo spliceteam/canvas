@@ -19,13 +19,13 @@ require (
 	github.com/paulmach/osm v0.8.0
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/tdewolff/argp v0.0.0-20240625173203-87b04d5d3e52
-	github.com/tdewolff/font v0.0.0-20241125190050-d899fdc808fc
+	github.com/tdewolff/font v0.0.0-20250120192450-68a3ecdf9008
 	github.com/tdewolff/minify/v2 v2.21.1
 	github.com/tdewolff/parse/v2 v2.7.19
 	github.com/tdewolff/test v1.0.11-0.20240106005702-7de5f7df4739
 	github.com/wcharczuk/go-chart/v2 v2.1.2
-	golang.org/x/image v0.22.0
-	golang.org/x/text v0.20.0
+	golang.org/x/image v0.23.0
+	golang.org/x/text v0.21.0
 	gonum.org/v1/plot v0.15.0
 )
 
@@ -68,7 +68,7 @@ require (
 	github.com/stretchr/testify v1.9.0 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	golang.org/x/mobile v0.0.0-20241016134751-7ff83004ec2c // indirect
-	golang.org/x/net v0.30.0
-	golang.org/x/sys v0.26.0 // indirect
+	golang.org/x/net v0.33.0
+	golang.org/x/sys v0.28.0 // indirect
 	star-tex.org/x/tex v0.5.0
 )

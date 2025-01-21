@@ -22,37 +22,65 @@ Whether this library is ready for production environments is up to your own judg
 
 Execution performance is actually really good, especially the rasterizer is highly optimized with ASM. See for example a comparison of an extreme case in https://github.com/tdewolff/canvas/issues/280#issuecomment-1995990038, where this library is at least twice as fast as existing solutions, and can handle bigger images than the likes of Inkscape and Cairo.
 
-The path intersection code and path boolean operation code is quite complete and fast, and more importantly has a time complexity of O(n log n). It may suffer from numerical precision which can be avoided using `Path.Gridsnap` beforehand.
+The path intersection code and path boolean operation code is quite complete and fast, and more importantly has a time complexity of O(n log n). It is numerically stable and does not suffer from floating-point precision errors.
 
 Please issue bug reports or feature requests to help this library mature! All help is appreciated. Also see [Wiki - Planning](https://github.com/tdewolff/canvas/wiki/Planning) for an inexhaustive list of ideas and TODOs.
 
 ## Features
-
-- Path segment types: MoveTo, LineTo, QuadTo, CubeTo, ArcTo, Close (https://github.com/tdewolff/canvas/wiki/Paths)
-- Precise path flattening, stroking, and dashing for all segment type uing papers (see below)
+### General
+- Path segment types: MoveTo, LineTo, QuadTo, CubeTo, ArcTo, Close (see [Paths](https://github.com/tdewolff/canvas/wiki/Paths))
+- Precise path flattening, stroking, and dashing for all segment types (see papers below)
 - Smooth spline generation through points for open and closed paths
-- Path boolean operations: AND, OR, XOR, NOT, Divide (https://github.com/tdewolff/canvas/wiki/Boolean-operations)
 - LaTeX to path conversion (native Go and CGO implementations available)
-- Font formats support (https://github.com/tdewolff/canvas/wiki/Fonts-&-Text)
-- - SFNT (such as TTF, OTF, WOFF, WOFF2, EOT) supporting TrueType, CFF, and CFF2 tables
-- HarfBuzz for text shaping (native Go and CGO implementations available)
-- FriBidi for text bidirectionality (native Go and CGO implementations available)
-- Donald Knuth's line breaking algorithm for text layout
 - sRGB compliance (use `SRGBColorSpace`, only available for rasterizer)
-- Font rendering with gamma correction of 1.43
-- Rendering targets (https://github.com/tdewolff/canvas/wiki/Renderers)
-- - Raster images (PNG, GIF, JPEG, TIFF, BMP, WEBP)
-- - PDF
-- - SVG and SVGZ
-- - PS and EPS
-- - HTMLCanvas
-- - OpenGL
-- - [Gio](https://gioui.org/)
-- - [Fyne](https://fyne.io/)
-- Rendering sources
-- - Canvas itself
-- - [go-chart](https://github.com/wcharczuk/go-chart)
-- - [gonum/plot](https://github.com/gonum/plot)
+
+### Rendering targets
+Paths can be exported as or rendered to:
+- Raster images (PNG, GIF, JPEG, TIFF, BMP, WEBP, AVIF, ...)
+- PDF
+- SVG and SVGZ
+- PS and EPS
+- HTMLCanvas
+- OpenGL
+- [Gio](https://gioui.org/)
+- [Fyne](https://fyne.io/)
+
+Additionally, it has bindings to be used as renderer for:
+- [go-chart](https://github.com/wcharczuk/go-chart)
+- [gonum/plot](https://github.com/gonum/plot)
+
+See [Renderers](https://github.com/tdewolff/canvas/wiki/Renderers) for more information.
+
+### Stable path boolean operations
+Numerically stable (!) path boolean operations, supporting AND, OR, XOR, NOT, and DIV operations in `O((n+k) log n)`, with `n` the number of segments and `k` the number of intersections. This is very fast and allows handling huge paths. It uses 64-bit floating-point precision for highly accurate computation and employs an additional strategy to ensure numerical stability. In particular:
+- Allows paths, subject or clipping, with any number of (overlapping) contours.
+- Allows contours with any orientation, clockwise or anticlockwise.
+- Contours may be concave or of any shape.
+- Contours may self-intersect any number of times.
+- Segments may overlap any number of times by any contour.
+- Points may be crossed any number of times.
+- Segments may be vertical.
+- Clipping path is implicitly closed (it makes no sense if it's an open path).
+- Subject path is currently implicitly closed, but it is WIP to support open paths.
+- Paths are currently flattened, but supporting Bézier or elliptical arcs is a WIP.
+
+Numerical stability refers to cases where two segments are extremely close where floating-point precision can alter the computation whether they intersect or not. This is a very difficult problem to solve, and many libraries cannot handle this properly (nor can they handle 'degenerate' paths in general, see the list of properties above). Note that fixed-point precision suffers from the same problem. This library builds on papers from Bentley & Ottmann, de Berg, Martínez, Hobby, and Hershberger (see bibliography below).
+
+Correctness and performance has been tested by drawing all land masses and islands from OpenStreetMap at various scales, which is a huge input (1 GB of compressed Shape files) with extremely degenerate data (many overlapping segments, overlapping points, vertical segments, self-intersections, extremely close intersections, different contour orientations, and so on).
+
+TODO: add benchmark with other libraries
+
+See [Boolean operations](https://github.com/tdewolff/canvas/wiki/Boolean-operations) for more information.
+
+### Advanced text rendering
+High-quality (comparable to TeX) text rendering and line breaking. It uses HarfBuzz for text shaping (native Go and CGO implementations available) and FriBidi for text bidirectionality (native Go and CGO implementations available), and uses Donald Knuth's line breaking algorithm for text layout. This enables the following features:
+- Align text left, center, right and justified, including indentation.
+- Align text top, middle, bottom in a text box, including setting line spacing.
+- Handle any script, eg. latin, cyrillic, devanagari, arabic, hebrew, han, etc.
+- Handle left-to-right, right-to-left, or top-to-bottom/bottom-to-top writing systems.
+- Mix scripts and fonts in a single line, eg. combine latin and arabic, or bold and regular styles.
+
+Additionally, many font formats are supported (such as TTF, OTF, WOFF, WOFF2, EOT) and rendering can apply a gamma correction of 1.43 for better results. See [Fonts & Text](https://github.com/tdewolff/canvas/wiki/Fonts-&-Text) for more information.
 
 ## Examples
 
@@ -121,14 +149,16 @@ This is a non-exhaustive list of library users I've come across. PRs are welcome
 
 #### Papers
 
-- [M. Walter, A. Fournier, Approximate Arc Length Parametrization, Anais do IX SIBGRAPHI (1996), p. 143--150](https://www.visgraf.impa.br/sibgrapi96/trabs/pdf/a14.pdf)
-- [T.F. Hain, et al., Fast, precise flattening of cubic Bézier path and offset curves, Computers & Graphics 29 (2005). p. 656--666](https://doi.org/10.1016/j.cag.2005.08.002)
-- [M. Goldapp, Approximation of circular arcs by cubic polynomials, Computer Aided Geometric Design 8 (1991), p. 227--238](https://doi.org/10.1016/0167-8396%2891%2990007-X)
-- [L. Maisonobe, Drawing and elliptical arc using polylines, quadratic or cubic Bézier curves (2003)](https://spaceroots.org/documents/ellipse/elliptical-arc.pdf)
-- [S.H. Kim and Y.J. Ahn, An approximation of circular arcs by quartic Bezier curves, Computer-Aided Design 39 (2007, p. 490--493)](https://doi.org/10.1016/j.cad.2007.01.004)
+- [M. Walter, A. Fournier, "Approximate Arc Length Parametrization", Anais do IX SIBGRAPHI (1996), p. 143--150](https://www.visgraf.impa.br/sibgrapi96/trabs/pdf/a14.pdf)
+- [T.F. Hain, et al., "Fast, precise flattening of cubic Bézier path and offset curves", Computers & Graphics 29 (2005). p. 656--666](https://doi.org/10.1016/j.cag.2005.08.002)
+- [M. Goldapp, "Approximation of circular arcs by cubic polynomials", Computer Aided Geometric Design 8 (1991), p. 227--238](https://doi.org/10.1016/0167-8396%2891%2990007-X)
+- [L. Maisonobe, "Drawing and elliptical arc using polylines, quadratic or cubic Bézier curves" (2003)](https://spaceroots.org/documents/ellipse/elliptical-arc.pdf)
+- [S.H. Kim and Y.J. Ahn, "An approximation of circular arcs by quartic Bezier curves", Computer-Aided Design 39 (2007, p. 490--493)](https://doi.org/10.1016/j.cad.2007.01.004)
 - D.E. Knuth and M.F. Plass, Breaking Paragraphs into Lines, Software: Practice and Experience 11 (1981), p. 1119--1184
 - L. Subramaniam, Partition of a non-simple polygon into simple polygons, 2003
-- [A simple algorithm for Boolean operations on polygons](https://doi.org/10.1016/j.advengsoft.2013.04.004)
+- [F. Martínez, et al., "A simple algorithm for Boolean operations on polygons"](https://doi.org/10.1016/j.advengsoft.2013.04.004)
+- [J.D. Hobby, "Practical segment intersection with ﬁnite precision output", Computational Geometry (1997)](https://doi.org/10.1016/S0925-7721%2899%2900021-8)
+- [J. Hershberger, "Stable snap rounding", Computational Geometry: Theory and Applications, 2013](https://doi.org/10.1016/j.comgeo.2012.02.011)
 
 ## License
 

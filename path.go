@@ -1,6 +1,8 @@
 package canvas
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"math"
@@ -60,12 +62,12 @@ func (fillRule FillRule) String() string {
 // TODO: make CloseCmd a LineTo + CloseCmd, where CloseCmd is only a command value, no coordinates
 // TODO: optimize command memory layout in paths: we need three bits to represent each command, thus 6 to specify command going forward and going backward. The remaining 58 bits, or 28 per direction, should specify the index into Path.d of the end of the sequence of coordinates. MoveTo should have an index to the end of the subpath. Use math.Float64bits. For long flat paths this will reduce memory usage in half since besides all coordinates, the only overhead is: 64 bits first MoveTo, 64 bits end of MoveTo and start of LineTo, 64 bits end of LineTo and start of Close, 64 bits end of Close.
 const (
-	MoveToCmd = 1.0 << iota //  1.0
-	LineToCmd               //  2.0
-	QuadToCmd               //  4.0
-	CubeToCmd               //  8.0
-	ArcToCmd                // 16.0
-	CloseCmd                // 32.0
+	MoveToCmd = 1.0
+	LineToCmd = 2.0
+	QuadToCmd = 4.0
+	CubeToCmd = 8.0
+	ArcToCmd  = 16.0
+	CloseCmd  = 32.0
 )
 
 var cmdLens = [6]int{4, 4, 6, 8, 8, 4}
@@ -131,6 +133,22 @@ func (p *Path) Data() []float64 {
 	return p.d
 }
 
+// GobEncode implements the gob interface.
+func (p *Path) GobEncode() ([]byte, error) {
+	b := bytes.Buffer{}
+	enc := gob.NewEncoder(&b)
+	if err := enc.Encode(p.d); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+// GobDecode implements the gob interface.
+func (p *Path) GobDecode(b []byte) error {
+	dec := gob.NewDecoder(bytes.NewReader(b))
+	return dec.Decode(&p.d)
+}
+
 // Empty returns true if p is an empty path or consists of only MoveTos and Closes.
 func (p *Path) Empty() bool {
 	return p == nil || len(p.d) <= cmdLen(MoveToCmd)
@@ -144,6 +162,32 @@ func (p *Path) Equals(q *Path) bool {
 	for i := 0; i < len(p.d); i++ {
 		if !Equal(p.d[i], q.d[i]) {
 			return false
+		}
+	}
+	return true
+}
+
+// Sane returns true if the path is sane, ie. it does not have NaN or infinity values.
+func (p *Path) Sane() bool {
+	sane := func(x float64) bool {
+		return !math.IsNaN(x) && !math.IsInf(x, 0.0)
+	}
+	for i := 0; i < len(p.d); {
+		cmd := p.d[i]
+		i += cmdLen(cmd)
+
+		if !sane(p.d[i-3]) || !sane(p.d[i-2]) {
+			return false
+		}
+		switch cmd {
+		case QuadToCmd:
+			if !sane(p.d[i-5]) || !sane(p.d[i-4]) {
+				return false
+			}
+		case CubeToCmd, ArcToCmd:
+			if !sane(p.d[i-7]) || !sane(p.d[i-6]) || !sane(p.d[i-5]) || !sane(p.d[i-4]) {
+				return false
+			}
 		}
 	}
 	return true
@@ -234,31 +278,24 @@ func (p *Path) Len() int {
 	return n
 }
 
-// Append appends path q to p and returns a new path if successful (otherwise either p or q are returned).
+// Append appends path q to p and returns the extended path p.
 func (p *Path) Append(qs ...*Path) *Path {
-	n := len(p.d)
-	for _, q := range qs {
-		if q != nil {
-			n += len(q.d)
-		}
-	}
-	r := &Path{make([]float64, 0, n)}
-	if !p.Empty() {
-		r.d = append(r.d, p.d...)
+	if p.Empty() {
+		p = &Path{}
 	}
 	for _, q := range qs {
 		if !q.Empty() {
-			r.d = append(r.d, q.d...)
+			p.d = append(p.d, q.d...)
 		}
 	}
-	return r
+	return p
 }
 
-// Join joins path q to p and returns a new path if successful (otherwise either p or q are returned). It's like executing the commands in q to p in sequence, where if the first MoveTo of q doesn't coincide with p, or if p ends in Close, it will fallback to appending the paths.
+// Join joins path q to p and returns the extended path p (or q if p is empty). It's like executing the commands in q to p in sequence, where if the first MoveTo of q doesn't coincide with p, or if p ends in Close, it will fallback to appending the paths.
 func (p *Path) Join(q *Path) *Path {
-	if q == nil || q.Empty() {
+	if q.Empty() {
 		return p
-	} else if p == nil || p.Empty() {
+	} else if p.Empty() {
 		return q
 	}
 
@@ -271,7 +308,6 @@ func (p *Path) Join(q *Path) *Path {
 	// add the first command through the command functions to use the optimization features
 	// q is not empty, so starts with a MoveTo followed by other commands
 	cmd := d[0]
-	p = p.Copy()
 	switch cmd {
 	case MoveToCmd:
 		p.MoveTo(d[1], d[2])
@@ -891,7 +927,10 @@ func (p *Path) Crossings(x, y float64) (int, bool) {
 // FillRule. It uses a ray from (x,y) toward (∞,y) and counts the number of intersections with
 // the path. When the point is on the boundary it is considered to be on the path's exterior.
 func (p *Path) Contains(x, y float64, fillRule FillRule) bool {
-	n, _ := p.Windings(x, y)
+	n, boundary := p.Windings(x, y)
+	if boundary {
+		return true
+	}
 	return fillRule.Fills(n)
 }
 
@@ -1612,7 +1651,7 @@ func (p *Path) SplitAt(ts ...float64) []*Path {
 		}
 	}
 	if cmdLen(MoveToCmd) < len(q.d) {
-		qs = append(qs, q)
+		push()
 	}
 	return qs
 }
@@ -2302,10 +2341,10 @@ func (p *Path) ToPDF() string {
 
 // ToRasterizer rasterizes the path using the given rasterizer and resolution.
 func (p *Path) ToRasterizer(ras *vector.Rasterizer, resolution Resolution) {
-	dpmm := resolution.DPMM()
-	// TODO: smoothen path using Ramer-... inside flatten
-	p = p.Flatten(PixelTolerance / dpmm) // tolerance of 1/10 of a pixel
+	// TODO: smoothen path using Ramer-...
 
+	dpmm := resolution.DPMM()
+	tolerance := PixelTolerance / dpmm // tolerance of 1/10 of a pixel
 	dy := float64(ras.Bounds().Size().Y)
 	for i := 0; i < len(p.d); {
 		cmd := p.d[i]
@@ -2314,6 +2353,31 @@ func (p *Path) ToRasterizer(ras *vector.Rasterizer, resolution Resolution) {
 			ras.MoveTo(float32(p.d[i+1]*dpmm), float32(dy-p.d[i+2]*dpmm))
 		case LineToCmd:
 			ras.LineTo(float32(p.d[i+1]*dpmm), float32(dy-p.d[i+2]*dpmm))
+		case QuadToCmd, CubeToCmd, ArcToCmd:
+			// flatten
+			var q *Path
+			var start Point
+			if 0 < i {
+				start = Point{p.d[i-3], p.d[i-2]}
+			}
+			if cmd == QuadToCmd {
+				cp := Point{p.d[i+1], p.d[i+2]}
+				end := Point{p.d[i+3], p.d[i+4]}
+				q = flattenQuadraticBezier(start, cp, end, tolerance)
+			} else if cmd == CubeToCmd {
+				cp1 := Point{p.d[i+1], p.d[i+2]}
+				cp2 := Point{p.d[i+3], p.d[i+4]}
+				end := Point{p.d[i+5], p.d[i+6]}
+				q = flattenCubicBezier(start, cp1, cp2, end, tolerance)
+			} else {
+				rx, ry, phi := p.d[i+1], p.d[i+2], p.d[i+3]
+				large, sweep := toArcFlags(p.d[i+4])
+				end := Point{p.d[i+5], p.d[i+6]}
+				q = flattenEllipticArc(start, rx, ry, phi, large, sweep, end, tolerance)
+			}
+			for j := 4; j < len(q.d); j += 4 {
+				ras.LineTo(float32(q.d[j+1]*dpmm), float32(dy-q.d[j+2]*dpmm))
+			}
 		case CloseCmd:
 			ras.ClosePath()
 		default:
